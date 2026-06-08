@@ -8,6 +8,14 @@ import os
 class Critic(BaseModel):
     def __init__(self, num_inputs, num_actions, hidden_dim, checkpoint_dir='checkpoints', name='q_network'):
         super(Critic, self).__init__()
+        
+        self.conv_channels = [3, 32, 64, 128]
+
+        self.conv1 = nn.Conv2d(self.conv_channels[0], self.conv_channels[1], kernel_size=3, stride=2, padding=1)  # 96->48
+        self.conv2 = nn.Conv2d(self.conv_channels[1], self.conv_channels[2], kernel_size=3, stride=2, padding=1)  # 48->24
+        self.conv3 = nn.Conv2d(self.conv_channels[2], self.conv_channels[3], kernel_size=3, stride=2, padding=1)  # 24->12
+
+        self.flatten = torch.nn.Flatten()
 
         # Q1 architecture
         self.linear1 = nn.Linear(num_inputs + num_actions, hidden_dim)
@@ -30,7 +38,11 @@ class Critic(BaseModel):
         self.apply(weights_init_)
 
     def forward(self, state, action):
-        xu = torch.cat([state, action], 1)
+        s = F.relu(self.conv1(state))
+        s = F.relu(self.conv2(s))
+        s = F.relu(self.conv3(s))
+        s = self.flatten(s)
+        xu = torch.cat([s, action], 1)
 
         x1 = F.relu(self.ln1(self.linear1(xu)))
         x1 = F.relu(self.ln2(self.linear2(x1)))

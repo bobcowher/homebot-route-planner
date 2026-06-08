@@ -1,8 +1,18 @@
 from agent import Agent
 import gymnasium as gym
+import homebot
 
-env = gym.make("CarRacing-v3", continuous=True, render_mode="rgb_array")
+env = gym.make(
+    "HomeBot2D-v1",
+    render_mode="rgb_array",   # "human", "rgb_array", or None
+    action_mode="continuous",    # "discrete" or "continuous"
+    obs_resolution=(96, 96),   # observation image size (H, W)
+    n_trash=2,                 # trash items per episode
+    max_steps=1000,            # steps before truncation
+    map_name="default",             # map layout
+    subgoals=True,            # True for LLM orchestration mode
+)
 
 agent = Agent(env=env, max_buffer_size=200000)
 
-agent.train(episodes=1200, offline_training_epochs=200, batch_size=32, wm_batch_size=200, imagination_steps=4, real_ratio=0.5)
+agent.train(episodes=1200, batch_size=32)

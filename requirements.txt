@@ -1,4 +1,3 @@
-gymnasium[box2d]
 matplotlib
 opencv-python==4.10.0.84
 tensorboard
@@ -6,3 +5,4 @@ tensorboard
 torch
 torchvision
 torchaudio
+git+https://github.com/bobcowher/gym-homebot-2d.git

@@ -14,6 +14,15 @@ epsilon = 1e-6
 class Actor(BaseModel):
     def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None, checkpoint_dir='checkpoints', name='policy_network'):
         super(Actor, self).__init__()
+
+        # Deeper representation
+        self.conv_channels = [3, 32, 64, 128]
+
+        self.conv1 = nn.Conv2d(self.conv_channels[0], self.conv_channels[1], kernel_size=3, stride=2, padding=1)  # 96->48
+        self.conv2 = nn.Conv2d(self.conv_channels[1], self.conv_channels[2], kernel_size=3, stride=2, padding=1)  # 48->24
+        self.conv3 = nn.Conv2d(self.conv_channels[2], self.conv_channels[3], kernel_size=3, stride=2, padding=1)  # 24->12
+
+        self.flatten = torch.nn.Flatten()
         
         self.linear1 = nn.Linear(num_inputs, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
@@ -39,7 +48,11 @@ class Actor(BaseModel):
                 (action_space.high + action_space.low) / 2.)
 
     def forward(self, state):
-        x = F.relu(self.linear1(state))
+        x = F.relu(self.conv1(state))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = self.flatten(x)
+        x = F.relu(self.linear1(x))
         x = F.relu(self.linear2(x))
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)

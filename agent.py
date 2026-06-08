@@ -4,9 +4,8 @@ import gymnasium as gym
 from gymnasium.spaces import Box
 import numpy as np
 import torch
-from buffer import EpisodeReplayBuffer
-from utils import hard_update, display_stacked_obs
-from models.world_model import WorldModel
+from buffer import ReplayBuffer
+from utils import hard_update
 from models.actor import Actor
 from models.critic import Critic
 from torch.optim import Adam
@@ -14,45 +13,12 @@ import cv2
 import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
-import random
-
-class MixedSampler:
-    """Yields (states, actions, rewards, next_states, dones) in latent space.
-
-    Each call randomly draws from the real replay buffer or world model imagination
-    based on real_ratio. Both sources return the same tensor shapes and reward scale.
-    """
-
-    def __init__(self, agent, real_ratio=0.5):
-        self.agent = agent
-        self.real_ratio = real_ratio
-
-    def sample(self, batch_size, horizon):
-        if random.random() < self.real_ratio:
-            return self._sample_real(batch_size, horizon)
-        return self._sample_imagined(batch_size, horizon)
-
-    def _sample_real(self, batch_size, horizon):
-        agent = self.agent
-        obs, actions, rewards, next_obs, dones = agent.memory.sample_nstep(batch_size * horizon, agent.n_step, agent.gamma)
-        with torch.no_grad():
-            states, _, _      = agent.world_model.encode(agent.normalize_observation(obs))
-            next_states, _, _ = agent.world_model.encode(agent.normalize_observation(next_obs))
-            states      = states.squeeze(1)
-            next_states = next_states.squeeze(1)
-        rewards = rewards.float()
-        return states, actions, rewards, next_states, dones
-
-    def _sample_imagined(self, batch_size, horizon):
-        return self.agent.imagine_trajectory(batch_size, horizon)
 
 
 class Agent:
 
     def __init__(self, env : gym.Env,
                        max_buffer_size : int = 10000,
-                       world_model_batch_size = 256,
-                       wm_sequence_length : int = 50,
                        target_update_interval = 10000,
                        alpha : float = 0.1,
                        tau : float = 0.005,
@@ -68,12 +34,11 @@ class Agent:
         os.makedirs("runs", exist_ok=True)
 
         obs, _ = self.env.reset()
-
         obs = self.process_observation(obs)
 
         # Actor operates in a structured 2D action space [steering, throttle_brake].
         # throttle_brake ∈ [-1, 1]: positive → gas, negative → brake.
-        # decode_action() maps this to the 3D CarRacing action before env.step().
+        # decode_action() maps this to the 3D env action before env.step().
         self.actor_action_space = Box(
             low=np.array([-1.0, -1.0], dtype=np.float32),
             high=np.array([1.0, 1.0], dtype=np.float32),
@@ -81,36 +46,39 @@ class Agent:
         self.n_actions = self.actor_action_space.shape[0]  # 2
         self.ac_hidden_size = 256
 
-        self.wm_sequence_length = wm_sequence_length
-        self.memory = EpisodeReplayBuffer(max_size=max_buffer_size, input_shape=obs.shape, input_device=self.device, output_device=self.device, action_dim=self.n_actions)
-
-        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.n_actions).to(self.device)
+        self.memory = ReplayBuffer(
+            max_size=max_buffer_size,
+            input_shape=obs.shape,
+            input_device='cpu',
+            output_device=self.device,
+            action_dim=self.n_actions,
+        )
 
         print(f"Observation shape: {obs.shape}")
 
-        self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=self.critic_lr)
+        # obs is (C, H, W); three stride-2 convs → (128, H//8, W//8)
+        _, H, W = obs.shape
+        conv_flat_size = 128 * (H // 8) * (W // 8)
 
-        self.world_model_batch_size = world_model_batch_size
-
-        self.critic = Critic(num_inputs=self.world_model.embed_dim,
-                             num_actions=self.n_actions, 
-                             hidden_dim=self.ac_hidden_size, 
-                             name=f"critic").to(device=self.device)
+        self.critic = Critic(num_inputs=conv_flat_size,
+                             num_actions=self.n_actions,
+                             hidden_dim=self.ac_hidden_size,
+                             name="critic").to(device=self.device)
 
         self.critic_optim = Adam(self.critic.parameters(), lr=self.critic_lr)
 
-        self.critic_target = Critic(num_inputs=self.world_model.embed_dim,
-                                    num_actions=self.n_actions, 
-                                    hidden_dim=self.ac_hidden_size, 
-                                    name=f"critic_target").to(self.device)
-        
+        self.critic_target = Critic(num_inputs=conv_flat_size,
+                                    num_actions=self.n_actions,
+                                    hidden_dim=self.ac_hidden_size,
+                                    name="critic_target").to(self.device)
+
         hard_update(self.critic_target, self.critic)
 
-        self.actor = Actor(num_inputs=self.world_model.embed_dim,
-                            num_actions=self.n_actions,
-                            hidden_dim=self.ac_hidden_size,
-                            action_space=self.actor_action_space,
-                            name=f"policy").to(self.device)
+        self.actor = Actor(num_inputs=conv_flat_size,
+                           num_actions=self.n_actions,
+                           hidden_dim=self.ac_hidden_size,
+                           action_space=self.actor_action_space,
+                           name="policy").to(self.device)
 
         self.actor_optim = Adam(self.actor.parameters(), lr=self.actor_lr)
 
@@ -120,204 +88,62 @@ class Agent:
         self.tau = tau
 
         self.total_steps = 0
-    
-    def decode_action(self, actor_action: np.ndarray) -> np.ndarray:
-        """Map 2D actor action [steering, throttle_brake] to 3D CarRacing action.
 
-        throttle_brake ∈ [-1, 1]: positive values → gas, negative → brake.
-        This eliminates simultaneous gas+brake and keeps the stored action
-        identical to the policy distribution being optimized.
-        """
+    def decode_action(self, actor_action: np.ndarray) -> np.ndarray:
         steering = float(actor_action[0])
         tb       = float(actor_action[1])
         gas      = max(0.0, tb)
         brake    = max(0.0, -tb)
         return np.array([steering, gas, brake], dtype=np.float32)
 
-    def normalize_observation(self, obs):
-        return obs / 255.0
-
     def process_observation(self, obs):
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
         obs = torch.from_numpy(obs).permute(2, 0, 1)
         return obs
 
+    def train_actor_critic(self, batch_size):
+        if not self.memory.can_sample(batch_size):
+            return None
 
-    def imagine_trajectory(self, batch_size, horizon):
-        """
-        Imagine parallel trajectories in latent space (no decoding).
-        
-        Args:
-            batch_size: Number of parallel trajectories to sample.
-            horizon: Number of steps to roll out for each trajectory.
+        state_batch, action_batch, reward_batch, next_state_batch, mask_batch = \
+            self.memory.sample_nstep(batch_size, self.n_step, self.gamma)
 
-        Returns flattened tensors of (batch_size * horizon, ...)
-        """
-        # Sample a batch of starting observations
-        obs, _, _, _, _ = self.memory.sample_buffer(batch_size)
-        obs = self.normalize_observation(obs)
-
-        # Encode initial observations to latent space
-        with torch.no_grad():
-            embeds, current_h_t, _ = self.world_model.encode(obs)
-            current_embeds = embeds.squeeze(1)
-
-        # Lists to store rollout steps
-        all_states      = []
-        all_actions     = []
-        all_rewards     = []
-        all_next_states = []
-        all_dones       = []
-
-        for _ in range(horizon):
-            with torch.no_grad():
-                action, _, _ = self.actor.sample(current_embeds)
-
-                next_embeds, next_h_t, _, rewards, dones = self.world_model.imagine_step(current_embeds, current_h_t, action)
-
-                all_states.append(current_embeds)
-                all_actions.append(action)
-                all_rewards.append(rewards.squeeze(-1))
-                all_next_states.append(next_embeds)
-                all_dones.append((dones.squeeze(-1) > 0.5).float())
-
-                current_embeds = next_embeds
-                current_h_t = next_h_t
-
-        # Concatenate and flatten for the Q-learner
-        states      = torch.cat(all_states, dim=0)      # (batch_size * horizon, embed_dim)
-        actions     = torch.cat(all_actions, dim=0)     # (batch_size * horizon)
-        rewards     = torch.cat(all_rewards, dim=0)     # (batch_size * horizon)
-        next_states = torch.cat(all_next_states, dim=0) # (batch_size * horizon, embed_dim)
-        dones       = torch.cat(all_dones, dim=0)       # (batch_size * horizon)
-
-        return states, actions, rewards, next_states, dones
-
-    def train_world_model(self, epochs, batch_size):
-        """Train world model on sequences of contiguous transitions."""
-
-        total_loss = 0.0
-        total_recon = 0.0
-        total_dynamics = 0.0
-        total_overshoot = 0.0
-        total_reward = 0.0
-        total_done = 0.0
-
-        for _ in range(epochs):
-            batch = self.memory.sample_sequences(batch_size, self.wm_sequence_length)
-
-            loss, loss_dict = self.world_model.compute_loss_sequential(batch)
-
-            self.world_model_optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
-            self.world_model_optimizer.step()
-
-            total_loss += loss_dict["total"]
-            total_recon += loss_dict["recon"]
-            total_dynamics += loss_dict["dynamics"]
-            total_overshoot += loss_dict["overshoot"]
-            total_reward += loss_dict["reward"]
-            total_done += loss_dict["done"]
-
-        return (
-            total_loss / epochs,
-            total_reward / epochs,
-            total_done / epochs,
-            total_recon / epochs,
-            total_dynamics / epochs,
-            total_overshoot / epochs,
-        )
-
-
-    def train_actor_critic(self, sampler, horizon, batch_size, epochs):
-
-        total_qf1_loss = 0.0
-        total_qf2_loss = 0.0
-        total_actor_loss = 0.0
-        total_alpha_loss = 0.0 
-
-        # Sample a batch from memory
-        for _ in range(epochs):
-            state_batch, action_batch, reward_batch, next_state_batch, mask_batch = sampler.sample(batch_size, horizon)
-
-            state_batch = state_batch.float().to(self.device)
-            next_state_batch = next_state_batch.float().to(self.device)
-            action_batch = action_batch.float().to(self.device)
-            reward_batch = reward_batch.float().to(self.device).unsqueeze(1)
-            mask_batch = mask_batch.float().to(self.device).unsqueeze(1)
-
-            with torch.no_grad():
-                next_state_action, next_state_log_pi, _ = self.actor.sample(next_state_batch)
-                qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
-                next_q_value = reward_batch + (1.0 - mask_batch) * (self.gamma ** self.n_step) * min_qf_next_target
-
-            qf1, qf2 = self.critic(state_batch, action_batch)  # Two Q-functions to mitigate positive bias in the policy improvement step
-            qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-            qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-            qf_loss = qf1_loss + qf2_loss
-
-            # Update the critic network
-            self.critic_optim.zero_grad()
-            qf_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
-            self.critic_optim.step()
-
-            pi, log_pi, _ = self.actor.sample(state_batch)
-
-            qf1_pi, qf2_pi = self.critic(state_batch, pi)
-            min_qf_pi = torch.min(qf1_pi, qf2_pi)
-
-            actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
-
-            self.actor_optim.zero_grad()
-            actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-            self.actor_optim.step()
-
-
-            alpha_loss = torch.tensor(0.).to(self.device)
-
-            total_qf1_loss += qf1_loss.item()
-            total_qf2_loss += qf2_loss.item()
-            total_actor_loss += actor_loss.item()
-            total_alpha_loss += alpha_loss.item()
-
-        return total_qf1_loss / epochs, total_qf2_loss / epochs, total_actor_loss / epochs, total_alpha_loss / epochs
-
-
-
-    def evaluate_reconstruction(self, num_samples=4, filename="reconstruction_test.png"):
-        """Evaluate reconstruction quality by comparing original vs reconstructed observations.
-
-        Args:
-            num_samples: Number of observations to reconstruct
-            filename: Output image path
-        """
-        if not self.memory.can_sample(num_samples):
-            return
-
-        # Sample observations from replay buffer
-        obs, _, _, _, _ = self.memory.sample_buffer(num_samples)
-        obs_normalized = obs.float() / 255.0
+        state_batch      = (state_batch.float()      / 255.0).to(self.device)
+        next_state_batch = (next_state_batch.float() / 255.0).to(self.device)
+        action_batch     = action_batch.float().to(self.device)
+        reward_batch     = reward_batch.float().to(self.device).unsqueeze(1)
+        mask_batch       = mask_batch.float().to(self.device).unsqueeze(1)
 
         with torch.no_grad():
-            embeds, _, _ = self.world_model.encode(obs_normalized)
-            recon = self.world_model.decode(embeds.squeeze(1))
+            next_state_action, next_state_log_pi, _ = self.actor.sample(next_state_batch)
+            qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
+            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
+            next_q_value = reward_batch + (1.0 - mask_batch) * (self.gamma ** self.n_step) * min_qf_next_target
 
-        # Prepare visualization pairs
-        viz_pairs = []
-        for i in range(num_samples):
-            viz_pairs.append((f"original_{i}", obs_normalized[i].cpu()))
-            viz_pairs.append((f"recon_{i}", recon[i].cpu()))
+        qf1, qf2 = self.critic(state_batch, action_batch)
+        qf1_loss = F.mse_loss(qf1, next_q_value)
+        qf2_loss = F.mse_loss(qf2, next_q_value)
+        qf_loss = qf1_loss + qf2_loss
 
-        # Save comparison image
-        display_stacked_obs(viz_pairs, filename, num_frames=1)
-        print(f"Saved reconstruction comparison to {filename}")
+        self.critic_optim.zero_grad()
+        qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        self.critic_optim.step()
+
+        pi, log_pi, _ = self.actor.sample(state_batch)
+        qf1_pi, qf2_pi = self.critic(state_batch, pi)
+        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+
+        actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+
+        self.actor_optim.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        self.actor_optim.step()
+
+        return qf1_loss.item(), qf2_loss.item(), actor_loss.item()
 
     def save(self):
-        self.world_model.save_the_model("world_model", verbose=True)
         self.actor.save_the_model("actor", verbose=True)
         self.critic.save_the_model("critic", verbose=True)
 
@@ -326,14 +152,12 @@ class Agent:
         torch.save({
             "episode": episode,
             "score": score,
-            "world_model": self.world_model.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
         }, path)
         print(f"Saved best checkpoint to {path} | episode: {episode} | score: {score:.1f}")
 
     def load(self):
-        self.world_model.load_the_model("world_model", device=self.device)
         self.actor.load_the_model("actor", device=self.device)
         self.critic.load_the_model("critic", device=self.device)
         hard_update(self.critic_target, self.critic)
@@ -349,11 +173,8 @@ class Agent:
             episode_reward = 0.0
 
             while not done:
-                with torch.no_grad():
-                    obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
-                    embed, _, _ = self.world_model.encode(obs_t)
-
-                actor_action = self.select_action(embed.squeeze(1), evaluate=True)
+                obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+                actor_action = self.select_action(obs_t, evaluate=True)
                 next_obs, reward, term, trunc, _ = self.env.step(self.decode_action(actor_action))
                 next_obs = self.process_observation(next_obs)
                 done = term or trunc
@@ -372,7 +193,7 @@ class Agent:
         if not isinstance(state, torch.Tensor):
             state = torch.tensor(state, dtype=torch.float32)
         state = state.float().to(self.device)
-        if state.dim() < 2:
+        if state.dim() < 4:
             state = state.unsqueeze(0)
         if evaluate:
             _, _, action = self.actor.sample(state)
@@ -381,26 +202,14 @@ class Agent:
         return action.detach().cpu().numpy()[0]
 
     def warmup_action(self) -> np.ndarray:
-        """Random action with forward bias for warmup exploration.
-
-        Stored in the replay buffer as-is — no post-hoc modification — so
-        the behavior policy matches what gets replayed during AC training.
-        steering ∈ [-1, 1] uniform; throttle_brake ∈ [0, 1] (gas only, no brake).
-        """
         steering       = np.random.uniform(-1.0, 1.0)
         throttle_brake = np.random.uniform(0.0, 1.0)
         return np.array([steering, throttle_brake], dtype=np.float32)
 
-
-    def train(self, episodes=1, offline_training_epochs=1, batch_size=1, wm_batch_size=1, imagination_steps=None, real_ratio=0.5, warmup_episodes=5, run_tag=None):
-
-        rollout_steps = imagination_steps if imagination_steps is not None else batch_size
+    def train(self, episodes=1, batch_size=32, warmup_episodes=5, run_tag=None):
 
         if run_tag is None:
             try:
-                # Find which remote branch matches HEAD — handles Beekeeper's
-                # "git reset --hard origin/<branch>" which doesn't update the
-                # local branch pointer, so git branch --show-current is wrong.
                 refs = subprocess.check_output(
                     ['git', 'for-each-ref', '--format=%(refname:short)',
                      '--points-at', 'HEAD', 'refs/remotes/origin/'],
@@ -408,7 +217,6 @@ class Agent:
                 if refs:
                     run_tag = refs.splitlines()[0].replace('origin/', '')
                 if not run_tag:
-                    # Fallback: local branch name (works on dev machines)
                     run_tag = subprocess.check_output(
                         ['git', 'branch', '--show-current'],
                         stderr=subprocess.DEVNULL).decode().strip()
@@ -416,11 +224,10 @@ class Agent:
                     run_tag = 'unknown'
             except Exception:
                 run_tag = 'unknown'
-        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
 
+        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
         writer = SummaryWriter(summary_writer_name)
 
-        mixed_sampler = MixedSampler(self, real_ratio=real_ratio)
         best_score = float("-inf")
 
         for episode in range(episodes):
@@ -429,18 +236,18 @@ class Agent:
 
             done = False
             episode_reward = 0.0
-            episode_loss = 0.0
             episode_steps = 0
+            total_qf1_loss  = 0.0
+            total_qf2_loss  = 0.0
+            total_actor_loss = 0.0
+            ac_updates = 0
 
             while not done:
-
                 if episode < warmup_episodes:
                     actor_action = self.warmup_action()
                 else:
-                    with torch.no_grad():
-                        obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
-                        embed, _, _ = self.world_model.encode(obs_t)
-                        actor_action = self.select_action(embed.squeeze(1))
+                    obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+                    actor_action = self.select_action(obs_t)
 
                 car_action = self.decode_action(actor_action)
                 next_obs, reward, term, trunc, _ = self.env.step(car_action)
@@ -453,8 +260,17 @@ class Agent:
 
                 episode_reward += float(reward)
                 episode_steps  += 1
-
                 obs = next_obs
+
+                # One AC update per env step after warmup
+                if episode >= warmup_episodes:
+                    result = self.train_actor_critic(batch_size)
+                    if result is not None:
+                        qf1_loss, qf2_loss, actor_loss = result
+                        total_qf1_loss  += qf1_loss
+                        total_qf2_loss  += qf2_loss
+                        total_actor_loss += actor_loss
+                        ac_updates += 1
 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | steps: {episode_steps}")
 
@@ -462,81 +278,21 @@ class Agent:
                 best_score = episode_reward
                 self.save_best(best_score, episode)
 
-            # Adaptive real_ratio: start at 1.0 (pure real data), decay to floor by ep 400
-            current_real_ratio = max(real_ratio, 1.0 - episode / 800.0)
-            mixed_sampler.real_ratio = current_real_ratio
-
-            current_ratio = [2, 2]
-
-            total_combined_loss = 0.0
-            total_reward_loss = 0.0
-            total_done_loss = 0.0
-            total_recon_loss = 0.0
-            total_dynamics_loss = 0.0
-            total_overshoot_loss = 0.0
-            total_qf1_loss = 0.0
-            total_qf2_loss = 0.0
-            total_actor_loss = 0.0
-            total_alpha_loss = 0.0
-            wm_updates = 0
-            ac_updates = 0
-
-            for _ in range(offline_training_epochs):
-                # World model updates
-                for _ in range(current_ratio[0]):
-                    if not self.memory.can_sample_sequences(wm_batch_size, self.wm_sequence_length):
-                        break
-                    combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, overshoot_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
-                    total_combined_loss += combined_loss
-                    total_reward_loss += reward_loss
-                    total_done_loss += done_loss
-                    total_recon_loss += recon_loss
-                    total_dynamics_loss += dynamics_loss
-                    total_overshoot_loss += overshoot_loss
-                    wm_updates += 1
-
-                if episode >= warmup_episodes:
-                    for _ in range(current_ratio[1]):
-                        qf1_loss, qf2_loss, actor_loss, alpha_loss = self.train_actor_critic(mixed_sampler, rollout_steps, batch_size, epochs=1)
-                        total_qf1_loss += qf1_loss
-                        total_qf2_loss += qf2_loss
-                        total_actor_loss += actor_loss
-                        total_alpha_loss += alpha_loss
-                        ac_updates += 1
-
             if episode % 10 == 0:
                 hard_update(self.critic_target, self.critic)
 
-            avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0.0
-            avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0.0
-            avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0.0
-            avg_recon_loss = total_recon_loss / wm_updates if wm_updates > 0 else 0.0
-            avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0.0
-            avg_overshoot_loss = total_overshoot_loss / wm_updates if wm_updates > 0 else 0.0
             episode_loss = (total_qf1_loss + total_qf2_loss) / (2 * ac_updates) if ac_updates > 0 else 0.0
 
-            writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
-            writer.add_scalar("World Model/reconstruction_loss", avg_recon_loss, episode)
-            writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
-            writer.add_scalar("World Model/overshoot_loss", avg_overshoot_loss, episode)
-            writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
-            writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
-
             if ac_updates > 0:
-                writer.add_scalar("SAC/qf1_loss", total_qf1_loss / ac_updates, episode)
-                writer.add_scalar("SAC/qf2_loss", total_qf2_loss / ac_updates, episode)
+                writer.add_scalar("SAC/qf1_loss",   total_qf1_loss   / ac_updates, episode)
+                writer.add_scalar("SAC/qf2_loss",   total_qf2_loss   / ac_updates, episode)
                 writer.add_scalar("SAC/actor_loss", total_actor_loss / ac_updates, episode)
-                writer.add_scalar("SAC/alpha_loss", total_alpha_loss / ac_updates, episode)
 
             writer.add_scalar("Train/episode_reward", episode_reward, episode)
             writer.add_scalar("Train/avg_critic_loss", episode_loss, episode)
-            writer.add_scalar("Train/real_ratio", current_real_ratio, episode)
             writer.add_scalar("Train/best_score", best_score, episode)
-
-            if episode % 10 == 0:
-                self.evaluate_reconstruction(num_samples=4, filename="reconstruction_test.png")
+            writer.add_scalar("Train/episode_steps", episode_steps, episode)
+            writer.add_scalar("Buffer/fill", min(self.memory.mem_ctr, self.memory.mem_size), episode)
 
             if episode % 10 == 0:
                 self.save()
-
-
