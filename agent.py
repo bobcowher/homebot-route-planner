@@ -7,6 +7,7 @@ import random
 import cv2
 import datetime
 from buffer import ReplayBuffer
+from episode_buffer import EpisodeBuffer
 from models.q_model import QModel
 from torch.utils.tensorboard.writer import SummaryWriter
 
@@ -54,6 +55,7 @@ class Agent:
 
         self.target_update_interval = target_update_interval
         self.total_steps = 0
+        self.episode_buffer = EpisodeBuffer()
 
     def process_observation(self, obs):
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
@@ -147,14 +149,17 @@ class Agent:
                 next_obs = self.process_observation(next_obs)
                 done = term or trunc
 
-                self.memory.store_transition(obs, action, reward, next_obs, done)
+                self.episode_buffer.store(obs, action, reward, next_obs, done, achieved_goal=None)
                 episode_reward += float(reward)
                 episode_steps  += 1
+                obs = next_obs
 
+            self.episode_buffer.flush_to(self.memory, desired_goal=None)
+            self.episode_buffer.clear()
+
+            for _ in range(episode_steps):
                 if self.memory.can_sample(batch_size):
                     episode_loss += self.train_step(batch_size)
-
-                obs = next_obs
 
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
 
