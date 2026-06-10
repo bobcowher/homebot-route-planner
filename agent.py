@@ -46,7 +46,7 @@ class Agent:
         ).to(self.device)
         self.target_q_model.load_state_dict(self.q_model.state_dict())
 
-        self.q_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
+        self.q_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.00005)
 
         self.gamma = 0.99
         self.epsilon = 1.0
