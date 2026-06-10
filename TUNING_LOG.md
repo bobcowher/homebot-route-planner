@@ -13,6 +13,15 @@ remote branch name, so tuning variants live on dedicated `tuning-*` branches
 Single GPU, parallel runs disabled → one run at a time. Baseline TB data is
 retained (tb_logs_max_runs=10) for comparison.
 
+**Branch hygiene:** each experiment gets a `tuning-*` branch (drives the TB
+tag). When an experiment concludes — loser: roll code back + delete local and
+remote branch; winner: fold into `tuning` + delete the experiment branch. Goal
+is at most one or two live `tuning-*` branches, not a graveyard. Cleanup status
+tracked per experiment below.
+
+### Branch cleanup ledger
+- `tuning-huber` (run 224): live — pending Exp 1 verdict.
+
 ---
 
 ## Baseline — Run 223 (`her` branch)
@@ -40,5 +49,6 @@ Result after ~530 episodes:
   spikes and Q divergence. Huber is linear past delta=1, the textbook DQN fix
   for exactly this symptom. Should stabilize Q and lift/steady success rate.
 - **Change:** `agent.py` train_step — `F.mse_loss` → `F.smooth_l1_loss`.
-- **Tag/branch:** `tuning` (run started from tuning branch).
-- **Status:** RUNNING — started below, awaiting comparison vs baseline 0.26.
+- **Tag/branch:** `tuning-huber` (TB tag derived from branch name).
+- **Run:** 224 (baseline 223 stopped to free the GPU; its TB data retained).
+- **Status:** RUNNING — awaiting comparison vs baseline 0.26.
