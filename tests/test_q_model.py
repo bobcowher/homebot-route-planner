@@ -19,3 +19,22 @@ def test_forward_single_sample():
     goal = torch.rand(1, 2)
     q    = model(obs, goal)
     assert q.shape == (1, 8)
+
+
+def test_goal_affects_output():
+    model = QModel(action_dim=8, input_shape=(3, 96, 96), goal_dim=2)
+    obs    = torch.rand(1, 3, 96, 96)
+    goal_a = torch.zeros(1, 2)
+    goal_b = torch.ones(1, 2)
+    q_a = model(obs, goal_a)
+    q_b = model(obs, goal_b)
+    assert not torch.allclose(q_a, q_b), "different goals must produce different Q-values"
+
+
+def test_gradients_flow_through_goal():
+    model = QModel(action_dim=8, input_shape=(3, 96, 96), goal_dim=2)
+    obs  = torch.rand(1, 3, 96, 96)
+    goal = torch.rand(1, 2, requires_grad=True)
+    q    = model(obs, goal)
+    q.sum().backward()
+    assert goal.grad is not None and goal.grad.abs().sum() > 0

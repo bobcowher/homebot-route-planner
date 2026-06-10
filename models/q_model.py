@@ -32,7 +32,7 @@ class QModel(BaseModel):
 
     def forward(self, obs, goal):
         x = self._conv_forward(obs)
-        g = F.relu(self.goal_encoder(goal))
+        g = self.goal_encoder(goal)
         x = torch.cat([x, g], dim=1)
         x = F.relu(self.fc1(x))
         return self.output(x)
