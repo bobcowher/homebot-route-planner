@@ -5,7 +5,7 @@ from models.base import BaseModel
 
 
 class QModel(BaseModel):
-    def __init__(self, action_dim, input_shape=(3, 96, 96)):
+    def __init__(self, action_dim, input_shape=(3, 96, 96), goal_dim=2):
         super(QModel, self).__init__()
 
         self.conv1 = nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4)
@@ -16,12 +16,13 @@ class QModel(BaseModel):
             dummy = torch.zeros(1, *input_shape)
             flat_size = self._conv_forward(dummy).shape[1]
 
-        self.fc1 = nn.Linear(flat_size, 512)
+        self.goal_encoder = nn.Linear(goal_dim, 128)
+        self.fc1    = nn.Linear(flat_size + 128, 512)
         self.output = nn.Linear(512, action_dim)
 
         self.apply(self._weights_init)
 
-        print(f"QModel: input={input_shape}, conv_flat={flat_size}, actions={action_dim}")
+        print(f"QModel: input={input_shape}, conv_flat={flat_size}, goal_dim={goal_dim}, actions={action_dim}")
 
     def _conv_forward(self, x):
         x = F.relu(self.conv1(x))
@@ -29,8 +30,10 @@ class QModel(BaseModel):
         x = F.relu(self.conv3(x))
         return x.flatten(1)
 
-    def forward(self, obs):
+    def forward(self, obs, goal):
         x = self._conv_forward(obs)
+        g = F.relu(self.goal_encoder(goal))
+        x = torch.cat([x, g], dim=1)
         x = F.relu(self.fc1(x))
         return self.output(x)
 
