@@ -20,7 +20,8 @@ is at most one or two live `tuning-*` branches, not a graveyard. Cleanup status
 tracked per experiment below.
 
 ### Branch cleanup ledger
-- `tuning-huber` (run 224): live — pending Exp 1 verdict.
+- `tuning-huber` (run 224): WON → merged into `tuning`, branch deleted.
+- `tuning-gamma` (Exp 2): live — pending Exp 2 verdict.
 
 ---
 
@@ -51,4 +52,21 @@ Result after ~530 episodes:
 - **Change:** `agent.py` train_step — `F.mse_loss` → `F.smooth_l1_loss`.
 - **Tag/branch:** `tuning-huber` (TB tag derived from branch name).
 - **Run:** 224 (baseline 223 stopped to free the GPU; its TB data retained).
-- **Status:** RUNNING — awaiting comparison vs baseline 0.26.
+  Completed full 1000 episodes in 33 min.
+- **Result vs baseline:**
+  - Q-loss smoothed **69 → 3.15**, spikes **4600 → 186**. Divergence solved.
+  - episode_reward peak **0.47 → 0.57**; actual recent success rate ~30–33%
+    (counted from log tail) vs baseline ~26%. (EMA `smoothed_final`=0.147 was
+    depressed by a cold streak in the last 9 episodes — ignore it; use the tail
+    count and peak.)
+- **Verdict: WIN — KEEP.** Folded into `tuning`. Huber stabilizes Q and modestly
+  lifts success. Stability headroom now enables raising gamma (Exp 2).
+
+### Exp 2 — gamma 0.99 → 0.995 (long-horizon value propagation)
+- **Hypothesis:** failures always burn all 1000 steps because distant goals are
+  invisible: `0.99^1000 ≈ 4e-5`. Raising gamma to 0.995 (`0.995^200=0.37` vs
+  `0.99^200=0.13`) propagates value further so the agent can "see" far trash.
+  Huber + grad-clip should contain the larger targets.
+- **Change:** `agent.py` `self.gamma = 0.99` → `0.995`. (On top of Huber.)
+- **Tag/branch:** `tuning-gamma`.
+- **Status:** RUNNING — run id recorded below. Compare success rate vs Exp 1 (~32%).
