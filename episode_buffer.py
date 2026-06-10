@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable
+import random
 import numpy as np
 import torch
 
@@ -22,9 +23,11 @@ class EpisodeBuffer:
         episode_buffer.store(obs, action, reward, next_obs, done, achieved_goal)
 
         # end of episode:
-        episode_buffer.flush_to(replay_buffer, desired_goal)
+        episode_buffer.send_to(replay_buffer, desired_goal, compute_reward)
         episode_buffer.clear()
     """
+
+    K = 4  # hindsight goals per transition (future strategy)
 
     def __init__(self):
         self._transitions: list[Transition] = []
@@ -45,36 +48,36 @@ class EpisodeBuffer:
     def clear(self):
         self._transitions.clear()
 
-    def flush_to(
+    def send_to(
         self,
         replay_buffer,
         desired_goal: np.ndarray,
         compute_reward: Callable,
     ) -> None:
-        """Store original transitions, then hindsight-relabeled transitions.
+        """Write original transitions then K hindsight-relabeled copies to replay_buffer.
 
-        TODO: implement HER relabeling.
-              1. Store each original transition as-is (reward from env).
-              2. For each step i, sample a hindsight goal from achieved_goals[i+1:]
-                 (strategy='future').
-              3. Relabeled reward = compute_reward(t.next_obs achieved_goal,
-                 hindsight_goal, {})  — batched, returns float32 0/1.
-              4. Store the relabeled transition.
+        Strategy: future — hindsight goals are sampled from achieved_goals strictly
+        after the current step. Last step is skipped (no future states).
         """
-        # --- original transitions ---
+        # Pass 1: original transitions (env reward, episode desired_goal)
         for t in self._transitions:
-            replay_buffer.store_transition(t.obs, t.action, t.reward, t.next_obs, t.done)
+            replay_buffer.store_transition(
+                t.obs, t.action, t.reward, t.next_obs, t.done, desired_goal
+            )
 
-        # --- hindsight transitions (TODO) ---
-        # import random
-        # for i, t in enumerate(self._transitions):
-        #     future = self._transitions[i + 1:]
-        #     if not future:
-        #         continue
-        #     hindsight_goal = random.choice(future).achieved_goal
-        #     hindsight_reward = float(compute_reward(t.achieved_goal, hindsight_goal, {}))
-        #     replay_buffer.store_transition(
-        #         t.obs, t.action, hindsight_reward, t.next_obs, t.done
-        #     )
-        _ = desired_goal  # will be used by hindsight block above
-        _ = compute_reward
+        # Pass 2: hindsight transitions
+        for i, t in enumerate(self._transitions):
+            future = self._transitions[i + 1:]
+            if not future:
+                continue
+            k = min(self.K, len(future))
+            for hg_t in random.sample(future, k):
+                hindsight_goal   = hg_t.achieved_goal
+                hindsight_reward = float(compute_reward(
+                    t.achieved_goal[np.newaxis],
+                    hindsight_goal[np.newaxis],
+                    {},
+                )[0])
+                replay_buffer.store_transition(
+                    t.obs, t.action, hindsight_reward, t.next_obs, t.done, hindsight_goal
+                )
