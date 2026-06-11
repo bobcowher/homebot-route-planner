@@ -27,7 +27,7 @@ class EpisodeBuffer:
         episode_buffer.clear()
     """
 
-    K = 4  # hindsight goals per transition (future strategy)
+    K = 2  # hindsight goals per transition (future strategy)
 
     def __init__(self):
         self._transitions: list[Transition] = []

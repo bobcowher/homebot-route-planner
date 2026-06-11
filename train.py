@@ -13,6 +13,6 @@ env = gym.make(
     goals=["collect_trash"],
 )
 
-agent = Agent(env=env, max_buffer_size=100000)
+agent = Agent(env=env, max_buffer_size=200000)
 
 agent.train(episodes=1000, batch_size=64)
