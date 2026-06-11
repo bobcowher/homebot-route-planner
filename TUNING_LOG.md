@@ -299,3 +299,26 @@ a cheap re-check on fixed code if we keep tuning. Next levers, in order:
 epsilon floor (0.1 → 0.05/decayed; 10% random actions is now the binding noise),
 then the Day-1 structural list (curriculum, relative-goal obs) for the remaining
 gap to consistent 1s.
+
+### Exp 10 — HER K=2 + buffer 200k (episodes-of-history fix)
+
+- **Hypothesis (Robert's):** run 233's late-run fade was catastrophic forgetting.
+  At K=4/100k a failed episode writes ~6000 transitions, so the buffer held only
+  ~16 episodes of history. K=2 + 200k → ~66 episodes retained, *and* a healthier
+  1:2 real:hindsight ratio. (Logged as one experiment: the single conceptual
+  variable is buffer history depth.)
+- **Branch/tag:** `tuning-k2-buf200k` · **Run:** 234 · VRAM 11.0GB as predicted
+- **Result (100-ep success windows):** 49% (720–819), 51% (820–919), **64%**
+  (887–986). Smoothed reward 0.72 at run end, peak **0.86 at ep 983** — still
+  climbing when the run hit the 1000-episode cap. Longest cold streak 8 episodes
+  (233 had 12). The final window is the strongest stretch of the entire project;
+  233's pattern (fade to 35%) is gone.
+- **Verdict:** ✅ KEEP. Forgetting hypothesis confirmed.
+- **Note:** Exp 8's "more episodes is flat" verdict is stale — it was measured on
+  the bugged HER code. The curve now rises through ep 1000, so episodes=2500 is
+  re-queued as Exp 11 (branch `tuning-episodes-2500`, prepared but not launched —
+  training server reserved for the evening). Decision rationale: more episodes
+  over more grad-steps/episode, because replay ratio is already ~8:1 at run end
+  and the missing ingredient is fresh far-start data, not more passes over the
+  buffer. Watch for a stall near 0.8 average — that may be the epsilon-0.1 floor,
+  not a ceiling; check greedy test() before tuning further.
