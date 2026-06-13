@@ -365,15 +365,21 @@ class Agent:
         return action.detach().cpu().numpy()[0]
 
     def warmup_action(self) -> np.ndarray:
-        """Random action with forward bias for warmup exploration.
+        """Heavily forward-biased warmup exploration for HomeBot [linear, angular].
 
-        Stored in the replay buffer as-is — no post-hoc modification — so
-        the behavior policy matches what gets replayed during AC training.
-        steering ∈ [-1, 1] uniform; throttle_brake ∈ [0, 1] (gas only, no brake).
+        linear is ALWAYS forward (>= 0, the car-racing gas-only equivalent) so
+        random exploration nets real displacement instead of spinning in place.
+        angular is zero-mean so the robot turns both ways rather than circling.
+        ~50% of steps drive mostly straight, ~50% turn while still moving forward.
+        Stored as-is so the behavior policy matches what AC training replays.
         """
-        steering       = np.random.uniform(-1.0, 1.0)
-        throttle_brake = np.random.uniform(0.0, 1.0)
-        return np.array([steering, throttle_brake], dtype=np.float32)
+        if np.random.random() < 0.5:
+            linear  = np.random.uniform(0.6, 1.0)   # drive forward, mostly straight
+            angular = np.random.uniform(-0.3, 0.3)
+        else:
+            linear  = np.random.uniform(0.3, 0.8)   # keep moving forward while turning
+            angular = np.random.uniform(-1.0, 1.0)
+        return np.array([linear, angular], dtype=np.float32)
 
 
     def train(self, episodes=1, offline_training_epochs=1, batch_size=1, wm_batch_size=1, imagination_steps=None, real_ratio=0.5, warmup_episodes=5, run_tag=None):

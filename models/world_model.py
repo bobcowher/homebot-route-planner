@@ -54,7 +54,9 @@ class WorldModel(BaseModel):
         self.detection_head = DetectionHead(embed_dim=embed_dim)
         # ~9 positive cells (3x3) of GRID*GRID within a frame that has an object.
         self.detect_bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(60.0))
-        self.detect_weight = 5.0
+        # 0.0 = detection head disabled (inert, zero gradient) for the pure
+        # car-racing-transplant baseline. Set back to 5.0 to re-enable.
+        self.detect_weight = 0.0
 
         print(f"World Model initialized. Input shape: {observation_shape}")
         print(f"  Embed dim: {embed_dim}")
