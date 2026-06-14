@@ -8,7 +8,7 @@ from agent import Agent
 
 def test_three_episode_train_runs_without_error():
     env = gym.make(
-        "HomeBot2D-Goal-v1",
+        "HomeBot2D-Goal-V1",
         render_mode="rgb_array",
         action_mode="discrete",
         obs_resolution=(96, 96),

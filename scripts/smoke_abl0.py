@@ -13,21 +13,17 @@ from agent import Agent
 
 
 def make_env():
-    for env_id in ("HomeBot2D-Goal-v1", "HomeBot2D-Goal-V1"):
-        try:
-            return gym.make(
-                env_id,
-                render_mode="rgb_array",
-                action_mode="discrete",
-                obs_resolution=(96, 96),
-                n_trash=2,
-                max_steps=60,
-                map_name="default",
-                goals=["collect_trash"],
-            )
-        except gym.error.Error:
-            continue
-    raise RuntimeError("no env id registered")
+    return gym.make(
+        "HomeBot2D-Goal-V1",
+        render_mode="rgb_array",
+        action_mode="discrete",
+        obs_resolution=(96, 96),
+        n_trash=2,
+        max_steps=60,
+        map_name="default",
+        goals=["collect_trash"],
+        random_start=True,
+    )
 
 
 env = make_env()

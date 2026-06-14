@@ -22,24 +22,17 @@ from models.q_model import QModel
 
 
 def make_env():
-    # Local homebot registers -V1 (capital), remote registers -v1.
-    for env_id in ("HomeBot2D-Goal-v1", "HomeBot2D-Goal-V1"):
-        try:
-            env = gym.make(
-                env_id,
-                render_mode="rgb_array",
-                action_mode="discrete",
-                obs_resolution=(96, 96),
-                n_trash=2,
-                max_steps=1000,
-                map_name="default",
-                goals=["collect_trash"],
-            )
-            print(f"Env: {env_id}")
-            return env
-        except gym.error.Error:
-            continue
-    raise RuntimeError("No HomeBot2D-Goal env id registered")
+    env = gym.make(
+        "HomeBot2D-Goal-V1",
+        render_mode="rgb_array",
+        action_mode="discrete",
+        obs_resolution=(96, 96),
+        n_trash=2,
+        max_steps=1000,
+        map_name="default",
+        goals=["collect_trash"],
+    )
+    return env
 
 
 def load_q_model(path, n_actions, device):

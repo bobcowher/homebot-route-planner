@@ -3,7 +3,7 @@ import gymnasium as gym
 import homebot
 
 env = gym.make(
-    "HomeBot2D-Goal-v1",
+    "HomeBot2D-Goal-V1",
     render_mode="human",
     action_mode="discrete",
     obs_resolution=(96, 96),
