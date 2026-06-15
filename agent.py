@@ -319,7 +319,7 @@ class Agent:
 
                 # Softmax (Boltzmann) eval readout: does sampling break the greedy
                 # limit cycles and close the train/greedy gap? Sweep two temps.
-                for temp in (0.05, 0.15):
+                for temp in (0.01, 0.025, 0.05):
                     sm_reach, sm_steps = self.softmax_eval(n_episodes=eval_episodes, temp=temp)
                     writer.add_scalar(f"Eval/softmax_reach_rate_t{temp}", sm_reach, episode)
                     writer.add_scalar(f"Eval/softmax_avg_success_steps_t{temp}", sm_steps, episode)
