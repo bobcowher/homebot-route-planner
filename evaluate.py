@@ -110,6 +110,8 @@ def main():
         "--epsilon", type=float, default=0.0,
         help="random-action rate; 0.1 reproduces training conditions",
     )
+    parser.add_argument("--goal-layers", type=int, default=1)
+    parser.add_argument("--head-layers", type=int, default=1)
     args = parser.parse_args()
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -119,7 +121,8 @@ def main():
     results = {}
     for path in args.checkpoints:
         print(f"\n=== {path} | {args.episodes} episodes | epsilon={args.epsilon} ===")
-        model = load_q_model(path, n_actions, device)
+        model = load_q_model(path, n_actions, device,
+                             goal_layers=args.goal_layers, head_layers=args.head_layers)
         results[path] = evaluate(model, env, args.episodes, device, args.epsilon)
 
     print("\n=== Summary ===")

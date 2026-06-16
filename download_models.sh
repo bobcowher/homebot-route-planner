@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BEEKEEPER_HOST="http://lab.local:5000"
-PROJECT="Q-Homebot"
+PROJECT="homebot-route-planner"
 DEST="$(dirname "$0")/checkpoints"
 
 mkdir -p "$DEST"
