@@ -14,10 +14,11 @@ env = gym.make(
     random_start=True,   # env owns spawn now (uniform valid tile, >=60px from goals)
 )
 
-# Coords + deep head + information bottleneck. Coords-deep overfit (train 0.94 >>
-# greedy eval 0.70); squeeze the fused decision rep through a 64-wide channel
-# before the action head to force compression and close the memorization gap.
+# depth-4 FUNNEL: 3x 512 head + a 128 taper before the output (512->512->512->128
+# ->out). The 4th layer adds depth AND a mild compression, vs depth-4's 4th full
+# 512. A/B against depth-4 (run 291): does a tapered 4th layer match/beat a full
+# one, distilling the decision rep more cheaply? goal encoder held at 2.
 agent = Agent(env=env, max_buffer_size=200000,
-              goal_layers=2, head_layers=2, bottleneck=64)
+              goal_layers=2, head_layers=3, bottleneck=128)
 
 agent.train(episodes=1200, batch_size=64, eval_interval=50, eval_episodes=20)
