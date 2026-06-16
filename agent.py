@@ -20,8 +20,13 @@ class Agent:
                        max_buffer_size: int = 100000,
                        target_update_interval: int = 1000,
                        goal_layers: int = 1,
-                       head_layers: int = 1) -> None:
+                       head_layers: int = 1,
+                       random_goal_tiles: bool = False) -> None:
         self.env = env
+        # When True, each episode's goal is a uniformly-sampled valid floor tile
+        # (whole-map coverage) instead of the env's trash/fixture goal — trains a
+        # navigator that reaches arbitrary commanded coords, not just trash spots.
+        self.random_goal_tiles = random_goal_tiles
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
         os.makedirs("checkpoints", exist_ok=True)
@@ -82,6 +87,24 @@ class Agent:
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
         obs = torch.from_numpy(obs).permute(2, 0, 1)
         return obs
+
+    def _reset_goal(self, base, desired_goal):
+        """If random-tile goals are on, replace the env's desired_goal with a
+        uniformly-sampled valid floor tile and sync the env's internal goal so
+        reward/termination track it. Covers the whole map (incl. doorway/fixture
+        coords that trash never spawns near). Returns the goal to use.
+
+        The goal is not rendered into the observation (egocentric viewport), so
+        overriding it post-reset is safe — only the goal vector changes.
+        """
+        if not self.random_goal_tiles:
+            return desired_goal
+        tiles = base._map.valid_floor_tiles()
+        col, row = tiles[int(base.np_random.integers(0, len(tiles)))]
+        gx, gy = base._map.tile_to_pixel(col, row)
+        goal = np.array([float(gx), float(gy)], dtype=np.float32)
+        base._desired_goal = goal
+        return goal
 
     def select_action(self, obs, goal):
         """goal: absolute coords [robot_x, robot_y, goal_x, goal_y] (map pixels)."""
@@ -156,6 +179,7 @@ class Agent:
             desired_goal = raw_obs["desired_goal"]
             base         = self.env.unwrapped
             r            = base._robot
+            desired_goal = self._reset_goal(base, desired_goal)
 
             done = False
             ep_reward = 0.0
@@ -200,6 +224,7 @@ class Agent:
             desired_goal = raw_obs["desired_goal"]
             base         = self.env.unwrapped
             r            = base._robot
+            desired_goal = self._reset_goal(base, desired_goal)
 
             done = False
             ep_reward = 0.0
@@ -256,6 +281,7 @@ class Agent:
             desired_goal = raw_obs["desired_goal"]
             base         = self.env.unwrapped
             r            = base._robot
+            desired_goal = self._reset_goal(base, desired_goal)
 
             done = False
             episode_reward = 0.0

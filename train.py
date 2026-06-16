@@ -14,9 +14,13 @@ env = gym.make(
     random_start=True,   # env owns spawn now (uniform valid tile, >=60px from goals)
 )
 
-# Depth ladder, rung 4: 4-layer head (all 512), constant width. Depth paid
-# monotonically 1->2->3 (greedy/softmax peak AND EMA); does it still climb at 4,
-# or plateau / destabilize (plain MLP, no residuals)? goal encoder held at 2.
-agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4)
+# Random-goal training on the locked depth-4 navigator (goal_layers=2/head=4).
+# random_goal_tiles=True: each episode's goal is a uniformly-sampled valid floor
+# tile (whole-map coverage) instead of a trash spot. chained_eval showed the
+# trash-only navigator generalizes to interior fixtures (45-65%) but fails the
+# east doorway (~0-15%) — a coord trash never spawns near. Whole-map goal
+# sampling fills that coverage gap. Train+eval both use random tiles.
+agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
+              random_goal_tiles=True)
 
 agent.train(episodes=1200, batch_size=64, eval_interval=50, eval_episodes=20)
