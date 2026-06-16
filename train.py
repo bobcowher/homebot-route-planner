@@ -14,8 +14,9 @@ env = gym.make(
     random_start=True,   # env owns spawn now (uniform valid tile, >=60px from goals)
 )
 
-# Depth ladder: 3-layer head (vs the depth-2 on main). Does head depth keep
-# paying past 2, or have we plateaued? goal encoder held at 2, coords rep.
-agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=3)
+# Depth ladder, rung 4: 4-layer head (all 512), constant width. Depth paid
+# monotonically 1->2->3 (greedy/softmax peak AND EMA); does it still climb at 4,
+# or plateau / destabilize (plain MLP, no residuals)? goal encoder held at 2.
+agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4)
 
 agent.train(episodes=1200, batch_size=64, eval_interval=50, eval_episodes=20)
