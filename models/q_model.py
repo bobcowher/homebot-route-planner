@@ -8,7 +8,7 @@ class QModel(BaseModel):
     def __init__(self, action_dim, input_shape=(3, 96, 96), goal_dim=4,
                  goal_scale=(864.0, 576.0, 864.0, 576.0),
                  goal_hidden=128, fc_hidden=512,
-                 goal_layers=1, head_layers=1):
+                 goal_layers=1, head_layers=1, bottleneck=None):
         super(QModel, self).__init__()
 
         # Coordinate reframing: goals arrive as absolute coords
@@ -41,12 +41,24 @@ class QModel(BaseModel):
             h_layers.append(nn.Linear(in_dim, fc_hidden))
             in_dim = fc_hidden
         self.head = nn.ModuleList(h_layers)
-        self.output = nn.Linear(fc_hidden, action_dim)
+
+        # Optional information bottleneck: squeeze the fused state+goal decision
+        # representation through a narrow channel right before the action head, so
+        # the net can't keep a high-res (state, goal) -> Q lookup. Targets the
+        # coord-memorization (train>>eval) gap while leaving conv perception and
+        # head depth intact. None = no bottleneck (== prior coords-deep).
+        self.bottleneck = bottleneck
+        if bottleneck is not None:
+            self.bottleneck_fc = nn.Linear(fc_hidden, bottleneck)
+            self.output = nn.Linear(bottleneck, action_dim)
+        else:
+            self.output = nn.Linear(fc_hidden, action_dim)
 
         self.apply(self._weights_init)
 
         print(f"QModel: input={input_shape}, conv_flat={flat_size}, goal_dim={goal_dim}, "
-              f"goal_layers={goal_layers}, head_layers={head_layers}, actions={action_dim}")
+              f"goal_layers={goal_layers}, head_layers={head_layers}, "
+              f"bottleneck={bottleneck}, actions={action_dim}")
 
     def _conv_forward(self, x):
         x = F.relu(self.conv1(x))
@@ -72,6 +84,8 @@ class QModel(BaseModel):
         x = torch.cat([x, g], dim=1)
         for layer in self.head:
             x = F.relu(layer(x))
+        if self.bottleneck is not None:
+            x = F.relu(self.bottleneck_fc(x))
         return self.output(x)
 
     def _weights_init(self, m):

@@ -20,7 +20,8 @@ class Agent:
                        max_buffer_size: int = 100000,
                        target_update_interval: int = 1000,
                        goal_layers: int = 1,
-                       head_layers: int = 1) -> None:
+                       head_layers: int = 1,
+                       bottleneck: int | None = None) -> None:
         self.env = env
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -49,6 +50,7 @@ class Agent:
             goal_dim=self.goal_dim,
             goal_layers=goal_layers,
             head_layers=head_layers,
+            bottleneck=bottleneck,
         ).to(self.device)
 
         self.target_q_model = QModel(
@@ -57,6 +59,7 @@ class Agent:
             goal_dim=self.goal_dim,
             goal_layers=goal_layers,
             head_layers=head_layers,
+            bottleneck=bottleneck,
         ).to(self.device)
         self.target_q_model.load_state_dict(self.q_model.state_dict())
 
