@@ -6,6 +6,23 @@ import torch
 
 from goal_geometry import world_coords
 
+# Blocked-move (wall-pin) penalty. A discrete action always commands a move, so a
+# near-zero displacement between achieved_prev and achieved_next means the robot
+# drove into a wall/fixture and was fully stopped. A partial wall-SLIDE keeps one
+# axis (~2.83px diagonal) and is NOT penalized — we only punish true pins (the
+# recliner/doorframe stick). Goal-independent, so it is applied to BOTH the
+# original and the hindsight-relabeled copies; otherwise the dominant hindsight
+# data (K=2 during bootstrap) would teach nothing about pinning. Assumes there is
+# no no-op action — every action is a real move, so 0 displacement == blocked.
+BLOCKED_EPS = 0.5        # px; below this the step made no progress (a true pin)
+BLOCKED_PENALTY = -0.01  # per-step reward added to a blocked move (tunable)
+
+
+def _blocked_penalty(t) -> float:
+    """BLOCKED_PENALTY if this transition was a full wall-pin, else 0.0."""
+    moved = float(np.linalg.norm(t.achieved_next - t.achieved_prev))
+    return BLOCKED_PENALTY if moved < BLOCKED_EPS else 0.0
+
 
 @dataclass
 class Transition:
@@ -89,7 +106,7 @@ class EpisodeBuffer:
             goal_at_sp = world_coords(t.achieved_next[0], t.achieved_next[1],
                                       dg[0], dg[1])
             replay_buffer.store_transition(
-                t.obs, t.action, t.reward, t.next_obs, t.done,
+                t.obs, t.action, t.reward + _blocked_penalty(t), t.next_obs, t.done,
                 goal_at_s, goal_at_sp,
                 motion=t.motion_prev, next_motion=t.motion_next,
             )
@@ -115,6 +132,10 @@ class EpisodeBuffer:
                 # relabeled success must be terminal too — otherwise targets bootstrap
                 # past the goal and inflate Q toward 1/(1-gamma) in hindsight data.
                 hindsight_done = hindsight_reward > 0.5
+                # Pin penalty is goal-independent; a relabeled success (terminal)
+                # can't be a pin (reaching the goal required moving), so applying
+                # it before the done check is safe.
+                hindsight_reward += _blocked_penalty(t)
                 hs_goal_at_s  = world_coords(t.achieved_prev[0], t.achieved_prev[1],
                                              hindsight_goal[0], hindsight_goal[1])
                 hs_goal_at_sp = world_coords(t.achieved_next[0], t.achieved_next[1],

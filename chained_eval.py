@@ -32,6 +32,14 @@ from task_chain import DEFAULT_CHAIN, resolve_goal
 
 VALID_NAMES = set(GOAL_NAMES) | {"go_to_human"}
 
+# go_to_door lands on a walk-on doorway tile, so "reached" must mean the robot is
+# actually AT the doorway — not the 79px solid-fixture reach, which scores a hit
+# 2+ tiles short (outside the hallway). Matches the env's tightened package-pickup
+# radius: robot.RADIUS(15) + tile_size(32) * _DOOR_RANGE(1.0) = 47px. Solid
+# fixtures (fridge/recliner) keep GOAL_THRESHOLD — the robot can't stand on them.
+DOOR_REACH = 47.0
+REACH_OVERRIDE = {"go_to_door": DOOR_REACH}
+
 
 def _select_action(model, obs, goal_xy, robot, device, readout, temp, motion):
     """One greedy/softmax action from the current obs + pose toward goal_xy."""
@@ -50,9 +58,10 @@ def _select_action(model, obs, goal_xy, robot, device, readout, temp, motion):
         return int(q.argmax().item())
 
 
-def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms):
+def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, reach):
     """Drive the navigator toward goal_xy until reached or budget exhausted.
-    ms is the per-episode MotionState (persists across legs).
+    ms is the per-episode MotionState (persists across legs); reach is the
+    per-leg reach radius in px (tighter for the walk-on door than for fixtures).
 
     Returns (reached, steps, obs). obs is threaded back out so the next leg
     continues from the live observation without an env reset.
@@ -64,7 +73,7 @@ def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms):
         ms.commit(robot.x, robot.y, action)
         next_obs, _, _, _, _ = env.step(action)
         obs = process_observation(next_obs)
-        if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= GOAL_THRESHOLD:
+        if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
             return True, steps, obs
     return False, budget, obs
 
@@ -94,8 +103,9 @@ def run_chain(model, env, chain, device, readout, temp, seed, budget_mult=1.0):
     results = []
     for name, (gx, gy) in targets:
         budget = max(1, int(eval_step_budget(distance(robot.x, robot.y, gx, gy)) * budget_mult))
+        reach = REACH_OVERRIDE.get(name, GOAL_THRESHOLD)
         reached, steps, obs = run_leg(model, env, base, obs, (gx, gy),
-                                      budget, device, readout, temp, ms)
+                                      budget, device, readout, temp, ms, reach)
         results.append((name, reached, steps))
     return results
 
