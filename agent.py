@@ -26,8 +26,18 @@ class Agent:
                        head_layers: int = 1,
                        head_norm: bool = False,
                        use_motion: bool = False,
-                       random_goal_tiles: bool = False) -> None:
+                       random_goal_tiles: bool = False,
+                       soft_q: bool = False,
+                       soft_alpha: float = 0.01) -> None:
         self.env = env
+        # Soft-Q (entropy-regularized) value backup + softmax behavior policy.
+        # Hard-Q greedy is a deterministic map over a deterministic env, so it can
+        # settle into structural limit cycles (A->left->A'->right->A). Soft-Q makes
+        # the policy stochastic by construction and the target a soft value
+        # alpha*logsumexp(Q/alpha); alpha is the (fixed) temperature — the one knob.
+        # Eval a soft-Q model with softmax at temp=alpha (matched by construction).
+        self.soft_q = soft_q
+        self.soft_alpha = soft_alpha
         # When True, each episode's goal is a uniformly-sampled valid floor tile
         # (whole-map coverage) instead of the env's trash/fixture goal — trains a
         # navigator that reaches arbitrary commanded coords, not just trash spots.
@@ -139,6 +149,13 @@ class Agent:
     def select_action(self, obs, goal, motion=None):
         """goal: absolute coords [robot_x, robot_y, goal_x, goal_y] (map pixels).
         motion: previous-motion feature (used only when use_motion)."""
+        # Soft-Q: sample a ~ softmax(Q/alpha). The entropy temperature IS the
+        # exploration mechanism, so no epsilon schedule (early flat Q -> ~uniform).
+        if self.soft_q:
+            with torch.no_grad():
+                q = self._q_forward(self.q_model, obs, goal, motion).squeeze(0)
+                probs = F.softmax(q / self.soft_alpha, dim=0)
+                return int(torch.multinomial(probs, 1).item())
         if random.random() < self.epsilon:
             return self.env.action_space.sample()
         with torch.no_grad():
@@ -158,9 +175,16 @@ class Agent:
         q_sa = self.q_model(obs, goals, motions).gather(1, actions)
 
         with torch.no_grad():
-            next_actions = self.q_model(next_obs, next_goals, next_motions).argmax(dim=1, keepdim=True)
-            next_q       = self.target_q_model(next_obs, next_goals, next_motions).gather(1, next_actions)
-            targets      = rewards + (1 - dones) * self.gamma * next_q
+            next_q_all = self.target_q_model(next_obs, next_goals, next_motions)
+            if self.soft_q:
+                # Soft value: V(s') = alpha * logsumexp(Q_target(s',.)/alpha).
+                next_v = self.soft_alpha * torch.logsumexp(
+                    next_q_all / self.soft_alpha, dim=1, keepdim=True)
+            else:
+                # Double-DQN: action from online net, value from target net.
+                next_actions = self.q_model(next_obs, next_goals, next_motions).argmax(dim=1, keepdim=True)
+                next_v = next_q_all.gather(1, next_actions)
+            targets = rewards + (1 - dones) * self.gamma * next_v
 
         loss = F.smooth_l1_loss(q_sa, targets)
 
@@ -298,10 +322,15 @@ class Agent:
             )
         self.q_model.eval()
         n_legs = len(DEFAULT_CHAIN)
+        # A soft-Q model is meant to be used stochastically; score it the way it
+        # deploys (softmax at temp=alpha) so the metric isn't a greedy undersell
+        # and is comparable to the hard-Q champion's softmax readout.
+        readout = "softmax" if self.soft_q else "greedy"
+        temp = self.soft_alpha if self.soft_q else 0.01
         total, full = 0, 0
         for i in range(n_episodes):
             legs = run_chain(self.q_model, self._chain_env, DEFAULT_CHAIN,
-                             self.device, "greedy", 0.01, seed=i)
+                             self.device, readout, temp, seed=i)
             reached = sum(1 for _, r, _ in legs if r)
             total += reached
             if reached == n_legs:
