@@ -53,7 +53,11 @@ class LLMClient:
 
     @staticmethod
     def _normalize(message) -> dict:
-        """OpenAI chat message -> {"tool_calls": [...], "text": str|None}."""
+        """OpenAI chat message -> {"tool_calls": [...], "text": str|None}.
+
+        Prefers the structured tool_calls field; falls back to recovering tool
+        calls emitted as TEXT in the content (Qwen via ollama sometimes does
+        this, leaking <tool_call> JSON into chat instead of calling the tool)."""
         tool_calls = []
         for tc in (message.tool_calls or []):
             tool_calls.append({
@@ -61,8 +65,63 @@ class LLMClient:
                 "name": tc.function.name,
                 "arguments": json.loads(tc.function.arguments or "{}"),
             })
-        return {"tool_calls": tool_calls,
-                "text": None if tool_calls else message.content}
+        if tool_calls:
+            return {"tool_calls": tool_calls, "text": None}
+        recovered, leftover = LLMClient._tool_calls_from_text(message.content)
+        return {"tool_calls": recovered,
+                "text": leftover if not recovered else (leftover or None)}
+
+    @staticmethod
+    def _tool_calls_from_text(content):
+        """Recover tool calls the model wrote into its text content. Strips any
+        stray <tool_call> tags, then scans for balanced JSON objects carrying a
+        'name'. Returns (tool_calls, leftover_text). Plain prose yields ([], prose)."""
+        if not content:
+            return [], content
+        s = content.replace("<tool_call>", "").replace("</tool_call>", "")
+        calls, matched = [], []
+        for a, b in LLMClient._json_spans(s):
+            try:
+                obj = json.loads(s[a:b])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and "name" in obj:
+                calls.append({"id": f"text-{len(calls)}", "name": obj["name"],
+                              "arguments": obj.get("arguments") or {}})
+                matched.append((a, b))
+        leftover = s
+        for a, b in reversed(matched):  # drop the consumed JSON from the text
+            leftover = leftover[:a] + leftover[b:]
+        leftover = leftover.strip()
+        return calls, (leftover or None)
+
+    @staticmethod
+    def _json_spans(s):
+        """(start, end) spans of every top-level brace-balanced {...} in s,
+        respecting strings/escapes so braces inside string values don't fool it."""
+        spans, depth, start = [], 0, None
+        in_str = esc = False
+        for i, ch in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}' and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    spans.append((start, i + 1))
+                    start = None
+        return spans
 
     def chat(self, messages: list[dict]) -> dict:
         resp = self.client.chat.completions.create(
