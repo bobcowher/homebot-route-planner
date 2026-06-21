@@ -32,6 +32,12 @@ def _say(text):
     return {"tool_calls": [], "text": text}
 
 
+def _bad_tool(arguments, cid="c1"):
+    """A go_to tool call with malformed arguments (what a real LLM sometimes emits)."""
+    return {"tool_calls": [{"id": cid, "name": "go_to",
+                            "arguments": arguments}], "text": None}
+
+
 def test_executes_tool_calls_then_returns_spoken_response():
     llm = MockLLM([_tool("trash"), _tool("fridge"), _tool("human"), _say("Done.")])
     nav = MockNav()
@@ -58,6 +64,19 @@ def test_conversation_persists_across_utterances():
     agent.handle_utterance("later")
     user_turns = [m for m in agent.conversation if m["role"] == "user"]
     assert len(user_turns) == 2
+
+
+def test_missing_destination_does_not_crash_loop():
+    # A real LLM sometimes emits go_to with no destination. The loop must feed an
+    # error result back (so the model can recover) instead of crashing the run.
+    llm = MockLLM([_bad_tool({}), _say("Sorry, I got confused.")])
+    nav = MockNav()
+    agent = PlannerAgent(llm, nav)
+    out = agent.handle_utterance("do the thing")
+    assert nav.visited == []  # malformed call never reaches the navigator
+    tool_msgs = [m for m in agent.conversation if m["role"] == "tool"]
+    assert len(tool_msgs) == 1 and "error" in tool_msgs[0]["content"]
+    assert out == "Sorry, I got confused."
 
 
 def test_tool_call_budget_stops_infinite_loops():

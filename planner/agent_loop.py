@@ -14,7 +14,8 @@ class PlannerAgent:
         self.client = client
         self.nav = navigator
         self.max_tool_calls = max_tool_calls
-        self.conversation = [{"role": "system", "content": system_prompt}]
+        self.conversation: list[dict] = [
+            {"role": "system", "content": system_prompt}]
 
     def handle_utterance(self, text: str) -> str:
         self.conversation.append({"role": "user", "content": text})
@@ -35,10 +36,22 @@ class PlannerAgent:
                     for tc in resp["tool_calls"]],
             })
             for tc in resp["tool_calls"]:
-                result = self.nav.go_to(tc["arguments"]["destination"])
+                result = self._dispatch(tc)
                 self.conversation.append({
                     "role": "tool", "tool_call_id": tc["id"],
                     "content": json.dumps(result)})
         msg = "I couldn't complete that within the step budget."
         self.conversation.append({"role": "assistant", "content": msg})
         return msg
+
+    def _dispatch(self, tc: dict) -> dict:
+        """Validate a tool call and run it. A live LLM can emit an unknown tool or
+        a go_to with no/invalid destination; return an error result (fed back to
+        the model) rather than crashing the run so the loop can recover."""
+        if tc["name"] != "go_to":
+            return {"error": f"unknown tool {tc['name']!r}; only go_to is available"}
+        destination = tc.get("arguments", {}).get("destination")
+        if not destination:
+            return {"error": "go_to requires a 'destination' argument "
+                             "(one of: fridge, human, door, trash)"}
+        return self.nav.go_to(destination)
