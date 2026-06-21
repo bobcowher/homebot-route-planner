@@ -1,8 +1,17 @@
 """NL-task suite for the planner: each task is (utterance, check(state)->bool).
 Run the real LLM end-to-end in sim and score on final world state — the
 chained_eval philosophy with the LLM generating the chain. score_task is
-LLM/Nav-agnostic (duck-typed) so it is unit-testable with fakes."""
+LLM/Nav-agnostic (duck-typed) so it is unit-testable with fakes.
+
+    python planner/eval_planner.py --episodes 10
+"""
 import argparse
+import os
+import sys
+
+# Allow direct-script invocation: put the repo root on the path so the absolute
+# `planner.` package imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TASKS = [
     ("Please tidy up — clear the trash.",
@@ -38,11 +47,15 @@ def main():
     passed = 0
     total = 0
     for utterance, check in TASKS:
+        task_passed = 0
         for i in range(args.episodes):
             agent = PlannerAgent(llm, nav)  # fresh conversation per task run
             ok = score_task(agent, nav, utterance, check, seed=i)
-            passed += int(ok); total += 1
-        print(f"  {utterance!r}: see running tally")
+            task_passed += int(ok)
+        passed += task_passed
+        total += args.episodes
+        print(f"  {utterance!r}: {task_passed}/{args.episodes} "
+              f"= {100.0 * task_passed / args.episodes:.0f}%")
     print(f"\nPlanner task completion: {passed}/{total} = {100.0 * passed / total:.0f}%")
 
 

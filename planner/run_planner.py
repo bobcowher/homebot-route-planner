@@ -3,6 +3,12 @@
     python planner/run_planner.py --utterance "bring me a drink"
 """
 import argparse
+import os
+import sys
+
+# Allow direct-script invocation (python planner/run_planner.py): put the repo
+# root on the path so the absolute `planner.` package imports resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def main():
