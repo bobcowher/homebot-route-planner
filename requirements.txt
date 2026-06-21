@@ -5,6 +5,7 @@ tensorboard
 torch
 torchvision
 torchaudio
+openai
 # Pinned to a commit SHA, not @main: pip treats an unchanged git URL as
 # "already satisfied" and never re-clones, so env changes silently never reach
 # the Beekeeper/local install. Bump this SHA whenever the env changes.
