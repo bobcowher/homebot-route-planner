@@ -77,6 +77,21 @@ def test_end_of_stream_ends_the_loop():
     assert agent.utterances == ["hello"]
 
 
+def test_hint_when_stdin_is_dead_before_any_input(capsys):
+    # `conda run` (no --no-capture-output) gives input() an instant EOF, so the
+    # REPL exits before reading anything -- looks like it "died". Emit a hint.
+    s, agent, nav, spoken = _session([])  # read() returns None immediately
+    s.start()
+    err = capsys.readouterr().err
+    assert "--no-capture-output" in err
+
+
+def test_no_dead_stdin_hint_after_normal_use(capsys):
+    s, agent, nav, spoken = _session(["do a thing", "quit"])
+    s.start()
+    assert "--no-capture-output" not in capsys.readouterr().err
+
+
 def test_blank_lines_are_skipped():
     s, agent, nav, spoken = _session(["", "   ", "real"])
     s.start()

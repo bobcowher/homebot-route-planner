@@ -6,7 +6,9 @@ The session talks through an injected (read, speak) I/O pair -- the voice seam.
 Defaults are terminal input()/print(); swap in ASR for read and TTS for speak to
 get audio with no change to the loop or the planner.
 
-    python planner/chat.py
+    conda activate sac-homebot && python planner/chat.py
+    # or, via conda run, stdin must be forwarded:
+    conda run --no-capture-output -n sac-homebot python planner/chat.py
 """
 import argparse
 import os
@@ -55,10 +57,19 @@ class ChatSession:
         self.nav.reset(seed=self.seed)
         self.speak("Ready. What would you like me to do? "
                    "(say 'reset' for a fresh scene, 'goodbye' to stop)")
+        got_input = False
         while True:
             line = self.read()
             if line is None:           # end of stream (EOF / closed audio)
+                if not got_input:
+                    # input() EOF'd before a single line -- almost always a
+                    # non-interactive stdin (e.g. plain `conda run` swallows it).
+                    print("(no input received -- stdin isn't connected. If you "
+                          "launched with `conda run`, add --no-capture-output, "
+                          "or `conda activate` the env and run python directly.)",
+                          file=sys.stderr)
                 break
+            got_input = True
             line = line.strip()
             if not line:
                 continue
