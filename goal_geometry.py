@@ -20,6 +20,29 @@ def distance(ax: float, ay: float, bx: float, by: float) -> float:
     return math.hypot(bx - ax, by - ay)
 
 
+def reach_reward(achieved, desired, radius):
+    """Sparse 0/1 reach reward at a PARAMETRIC radius -- the success-radius
+    curriculum knob. Mirrors the env's compute_reward (1.0 within `radius`, else 0)
+    but with a settable radius, so the curriculum is a pure HER/relabel artifact:
+    shrinking `radius` over training teaches a tighter terminal approach with no env
+    change. Handles single (x,y) or batched (...,2) inputs (HER passes arrays)."""
+    diff = np.asarray(achieved, dtype=np.float32) - np.asarray(desired, dtype=np.float32)
+    dist = np.linalg.norm(diff, axis=-1)
+    return (dist <= radius).astype(np.float32)
+
+
+def reach_radius_at(episode, start, end, anneal_start, anneal_end):
+    """Linear success-radius schedule: hold `start` until `anneal_start`, anneal to
+    `end` by `anneal_end`, hold `end` after. Anneal during the high-hindsight phase
+    (before HER's k-anneal) so the tighter radius always has dense relabel signal."""
+    if episode <= anneal_start:
+        return start
+    if episode >= anneal_end:
+        return end
+    frac = (episode - anneal_start) / max(1, anneal_end - anneal_start)
+    return start + (end - start) * frac
+
+
 def spin_thresholds(window: int = SPIN_WINDOW):
     """Default (move_min, net_max) for spin_fraction, in pixels. A window 'spins'
     when it walked >= half the window's worth of steps but ended within ~2 steps

@@ -9,7 +9,8 @@ import cv2
 import datetime
 from buffer import ReplayBuffer
 from episode_buffer import EpisodeBuffer
-from goal_geometry import world_coords, spin_fraction, spin_thresholds, SPIN_WINDOW
+from goal_geometry import (world_coords, spin_fraction, spin_thresholds, SPIN_WINDOW,
+                           reach_reward, reach_radius_at)
 from motion import MotionState, motion_dim
 from models.q_model import QModel
 from policy import softmax_rel_probs
@@ -322,7 +323,17 @@ class Agent:
 
     def train(self, episodes=1000, batch_size=64, run_tag=None,
               eval_interval=50, eval_episodes=20, chain_eval_interval=10,
-              her_anneal_start=None):
+              her_anneal_start=None,
+              reach_start=None, reach_end=None,
+              reach_anneal_start=0, reach_anneal_end=None):
+        # Success-radius curriculum: when reach_start is set, the per-episode reach/
+        # terminal radius anneals reach_start -> reach_end over [anneal_start,
+        # anneal_end], replacing the env's fixed 79px reward+termination. Pure HER
+        # artifact -- no env change (see goal_geometry.reach_reward). reach_start
+        # None preserves the original env-reward behavior exactly.
+        use_reach_curriculum = reach_start is not None
+        if use_reach_curriculum and reach_anneal_end is None:
+            reach_anneal_end = episodes
         if run_tag is None:
             try:
                 refs = subprocess.check_output(
@@ -351,6 +362,11 @@ class Agent:
             desired_goal = self._reset_goal(base, desired_goal)
             ms           = MotionState(self.n_actions, self.motion_window)
 
+            if use_reach_curriculum:
+                reach_radius = reach_radius_at(episode, reach_start, reach_end,
+                                               reach_anneal_start, reach_anneal_end)
+                writer.add_scalar('Train/reach_radius', reach_radius, episode)
+
             done = False
             episode_reward = 0.0
             episode_loss   = 0.0
@@ -365,7 +381,7 @@ class Agent:
                 action       = self.select_action(obs, goal_vec, motion_prev)
                 ms.commit(r.x, r.y, action)
 
-                raw_next, reward, term, trunc, _ = self.env.step(action)
+                raw_next, env_reward, env_term, trunc, _ = self.env.step(action)
                 next_obs     = self.process_observation(raw_next["observation"])
                 heading_next = r.angle
                 pos_next     = np.array([r.x, r.y], dtype=np.float32)
@@ -373,6 +389,16 @@ class Agent:
                 # ms.vec at the new pose reproduces it (history already holds the
                 # pose we just committed), so the windowed term comes for free.
                 motion_next  = ms.vec(pos_next[0], pos_next[1])
+                if use_reach_curriculum:
+                    # Recompute reward + terminal at the scheduled radius from the
+                    # pose we already have; the env's fixed-79px reward/termination
+                    # is ignored. Driving the rollout's `done` off this radius means
+                    # the robot keeps approaching past 79px -- gathering on-policy
+                    # data in the dead zone that the env would otherwise cut short.
+                    reward = float(reach_reward(pos_next, desired_goal, reach_radius))
+                    term   = reward > 0.5
+                else:
+                    reward, term = env_reward, env_term
                 done = term or trunc
 
                 # Store term (not trunc): a timeout is not a terminal state, so the
@@ -406,10 +432,16 @@ class Agent:
                 span = max(1, episodes - her_anneal_start)
                 frac = min(1.0, (episode - her_anneal_start) / span)
                 k_eff = self.episode_buffer.K * (1.0 - frac)
+            # HER reward: curriculum radius when enabled (so relabeled goals score at
+            # the same tightening radius as the rollout), else the env's fixed bar.
+            her_reward = (
+                (lambda a, d, info: reach_reward(a, d, reach_radius))
+                if use_reach_curriculum
+                else self.env.unwrapped.compute_reward)  # type: ignore[attr-defined]
             self.episode_buffer.send_to(
                 self.memory,
                 desired_goal=desired_goal,
-                compute_reward=self.env.unwrapped.compute_reward,  # type: ignore[attr-defined]
+                compute_reward=her_reward,
                 k=k_eff,
             )
             self.episode_buffer.clear()
