@@ -39,14 +39,20 @@ def make_env():
 
 
 def load_q_model(path, n_actions, device, goal_layers=1, head_layers=1, head_norm=False,
-                 use_motion=False, motion_window=1):
+                 use_motion=False, motion_window=1, macro_h=1):
+    """n_actions is the BASE action count. For a macro checkpoint (macro_h>1) the
+    output head is n_actions ** macro_h; macro_h is read from the checkpoint meta when
+    present so callers need not know it. The returned model carries macro_h / n_base
+    so every eval path can decode an output index back to base actions."""
     state = torch.load(path, map_location=device)
     if "q_model" in state:  # best.pt wraps the state_dict with metadata
         print(f"  ({path} is a best-checkpoint from episode {state.get('episode')})")
+        macro_h = state.get("macro_h", macro_h)
         state = state["q_model"]
-    model = QModel(action_dim=n_actions, goal_layers=goal_layers,
+    model = QModel(action_dim=n_actions ** macro_h, goal_layers=goal_layers,
                    head_layers=head_layers, head_norm=head_norm,
-                   use_motion=use_motion, motion_window=motion_window).to(device)
+                   use_motion=use_motion, motion_window=motion_window,
+                   macro_h=macro_h, n_base=n_actions).to(device)
     model.load_state_dict(state)
     model.eval()
     return model

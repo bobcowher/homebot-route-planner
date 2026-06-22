@@ -32,6 +32,7 @@ from evaluate import load_q_model, process_observation
 from goal_geometry import distance, eval_step_budget, ROBOT_STEP_PX, spin_fraction
 from motion import MotionState
 from chained_eval import _select_action, REACH_OVERRIDE
+from policy import decode_macro
 from task_chain import DEFAULT_CHAIN, resolve_goal
 
 
@@ -66,27 +67,32 @@ def leg_positions(model, env, base, obs, goal_xy, budget, device, readout, temp,
     point (where the vibration actually lives)."""
     robot = base._robot
     positions = [(robot.x, robot.y)]
+    macro_h = getattr(model, "macro_h", 1)
+    n_base = getattr(model, "n_base", env.action_space.n)
     reached = False
     steps = 0
     while steps < budget:
         motion = ms.vec(robot.x, robot.y)
-        action = _select_action(model, _add_noise(obs, input_noise), goal_xy,
-                                robot, device, readout, temp, motion)
-        k = repeat_k
-        if not repeat_near_goal and \
-                distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
-            k = 1  # near-goal guard: single-step on terminal approach
-        for _ in range(k):
-            ms.commit(robot.x, robot.y, action)
-            obs = process_observation(env.step(action)[0])
-            positions.append((robot.x, robot.y))
-            steps += 1
-            if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
-                reached = True
+        idx = _select_action(model, _add_noise(obs, input_noise), goal_xy,
+                             robot, device, readout, temp, motion)
+        for action in decode_macro(idx, macro_h, n_base):
+            k = repeat_k
+            if not repeat_near_goal and \
+                    distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
+                k = 1  # near-goal guard: single-step on terminal approach
+            for _ in range(k):
+                ms.commit(robot.x, robot.y, action)
+                obs = process_observation(env.step(action)[0])
+                positions.append((robot.x, robot.y))
+                steps += 1
+                if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
+                    reached = True
+                    break
+                if steps >= budget:
+                    break
+            if reached or steps >= budget:
                 break
-            if steps >= budget:
-                break
-        if reached:
+        if reached or steps >= budget:
             break
     return reached, positions, obs
 

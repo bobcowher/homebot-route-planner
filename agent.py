@@ -13,7 +13,7 @@ from goal_geometry import (world_coords, spin_fraction, spin_thresholds, SPIN_WI
                            reach_reward, reach_radius_at)
 from motion import MotionState, motion_dim
 from models.q_model import QModel
-from policy import softmax_rel_probs
+from policy import softmax_rel_probs, decode_macro
 from task_chain import DEFAULT_CHAIN
 from chained_eval import run_chain
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -33,7 +33,8 @@ class Agent:
                        soft_q: bool = False,
                        soft_alpha: float = 0.01,
                        softmax_behavior: bool = False,
-                       softmax_behavior_temp: float = 0.1) -> None:
+                       softmax_behavior_temp: float = 0.1,
+                       macro_h: int = 1) -> None:
         self.env = env
         # Soft-Q (entropy-regularized) value backup + softmax behavior policy.
         # Hard-Q greedy is a deterministic map over a deterministic env, so it can
@@ -66,7 +67,13 @@ class Agent:
         raw_obs, _ = self.env.reset()
         obs = self.process_observation(raw_obs["observation"])
 
-        self.n_actions = self.env.action_space.n  # type: ignore[union-attr]
+        # Macro-action head: the agent SELECTS over length-macro_h sequences of base
+        # actions (n_actions = n_base ** macro_h is the output/selection space), and
+        # executes the decoded sequence open-loop. macro_h=1 == the per-step policy.
+        # Motion features and MotionState stay over BASE actions (n_base).
+        self.n_base = self.env.action_space.n  # type: ignore[union-attr]
+        self.macro_h = macro_h
+        self.n_actions = self.n_base ** macro_h
 
         # Coordinate reframing: goal is [robot_x, robot_y, goal_x, goal_y].
         self.goal_dim = 4
@@ -77,7 +84,7 @@ class Agent:
         # limit cycle (spinning) becomes observable, not just the stationary stick.
         self.use_motion = use_motion
         self.motion_window = motion_window
-        self.motion_dim = motion_dim(self.n_actions, motion_window) if use_motion else 0
+        self.motion_dim = motion_dim(self.n_base, motion_window) if use_motion else 0
 
         self.memory = ReplayBuffer(
             max_size=max_buffer_size,
@@ -98,6 +105,8 @@ class Agent:
             use_motion=use_motion,
             motion_in_dim=self.motion_dim or None,
             motion_window=motion_window,
+            macro_h=macro_h,
+            n_base=self.n_base,
         ).to(self.device)
 
         self.target_q_model = QModel(
@@ -110,6 +119,8 @@ class Agent:
             use_motion=use_motion,
             motion_in_dim=self.motion_dim or None,
             motion_window=motion_window,
+            macro_h=macro_h,
+            n_base=self.n_base,
         ).to(self.device)
         self.target_q_model.load_state_dict(self.q_model.state_dict())
 
@@ -178,7 +189,7 @@ class Agent:
                 probs = F.softmax(q / self.soft_alpha, dim=0)
                 return int(torch.multinomial(probs, 1).item())
         if random.random() < self.epsilon:
-            return self.env.action_space.sample()
+            return random.randrange(self.n_actions)  # random macro index (0..n_macro-1)
         with torch.no_grad():
             q = self._q_forward(self.q_model, obs, goal, motion).squeeze(0)
             if self.softmax_behavior:
@@ -214,7 +225,10 @@ class Agent:
                 # Double-DQN: action from online net, value from target net.
                 next_actions = self.q_model(next_obs, next_goals, next_motions).argmax(dim=1, keepdim=True)
                 next_v = next_q_all.gather(1, next_actions)
-            targets = rewards + (1 - dones) * self.gamma * next_v
+            # gamma**macro_h: a macro transition jumps macro_h env steps (open-loop),
+            # so the bootstrap is discounted by that many steps (SMDP backup).
+            # macro_h=1 -> self.gamma, the per-step backup.
+            targets = rewards + (1 - dones) * (self.gamma ** self.macro_h) * next_v
 
         loss = F.smooth_l1_loss(q_sa, targets)
 
@@ -242,6 +256,8 @@ class Agent:
             "q_model": self.q_model.state_dict(),
             "episode": episode,
             "chain_score": chain_score,
+            "macro_h": self.macro_h,
+            "n_base": self.n_base,
         }, path)
         print(f"  New best checkpoint saved (episode={episode}, chain_score={chain_score:.2f})")
 
@@ -259,7 +275,7 @@ class Agent:
             base         = self.env.unwrapped
             r            = base._robot
             desired_goal = self._reset_goal(base, desired_goal)
-            ms           = MotionState(self.n_actions, self.motion_window)
+            ms           = MotionState(self.n_base, self.motion_window)
 
             done = False
             ep_reward = 0.0
@@ -268,13 +284,16 @@ class Agent:
                                         desired_goal[0], desired_goal[1])
                 motion = ms.vec(r.x, r.y)
                 with torch.no_grad():
-                    action = self._q_forward(self.q_model, obs, goal_vec, motion).argmax(dim=1).item()
-                ms.commit(r.x, r.y, action)
-
-                raw_next, reward, term, trunc, _ = self.env.step(action)
-                obs = self.process_observation(raw_next["observation"])
-                ep_reward += float(reward)
-                done = term or trunc
+                    macro = self._q_forward(self.q_model, obs, goal_vec, motion).argmax(dim=1).item()
+                # Execute the decoded macro open-loop (same as the rollout/deploy).
+                for a in decode_macro(macro, self.macro_h, self.n_base):
+                    ms.commit(r.x, r.y, a)
+                    raw_next, reward, term, trunc, _ = self.env.step(a)
+                    obs = self.process_observation(raw_next["observation"])
+                    ep_reward += float(reward)
+                    done = term or trunc
+                    if done:
+                        break
 
             if ep_reward > 0.5:
                 successes += 1
@@ -360,7 +379,7 @@ class Agent:
             base         = self.env.unwrapped
             r            = base._robot
             desired_goal = self._reset_goal(base, desired_goal)
-            ms           = MotionState(self.n_actions, self.motion_window)
+            ms           = MotionState(self.n_base, self.motion_window)
 
             if use_reach_curriculum:
                 reach_radius = reach_radius_at(episode, reach_start, reach_end,
@@ -378,34 +397,42 @@ class Agent:
                 goal_vec     = world_coords(r.x, r.y,
                                             desired_goal[0], desired_goal[1])
                 motion_prev  = ms.vec(r.x, r.y)
-                action       = self.select_action(obs, goal_vec, motion_prev)
-                ms.commit(r.x, r.y, action)
+                macro        = self.select_action(obs, goal_vec, motion_prev)
 
-                raw_next, env_reward, env_term, trunc, _ = self.env.step(action)
+                # Execute the decoded macro OPEN-LOOP: commit each base action and
+                # step the env, stopping early only on a true terminal (reach). The
+                # macro otherwise runs its full length so the gamma**macro_h bootstrap
+                # in train_step is exact; truncation is handled at the macro boundary
+                # (stored as not-done). One macro -> one stored transition spanning
+                # `macro_steps` env steps. macro_h=1 reduces to the per-step rollout.
+                reward, term, trunc = 0.0, False, False
+                macro_steps = 0
+                for a in decode_macro(macro, self.macro_h, self.n_base):
+                    ms.commit(r.x, r.y, a)
+                    raw_next, env_reward, env_term, trunc, _ = self.env.step(a)
+                    pos_next = np.array([r.x, r.y], dtype=np.float32)
+                    if use_reach_curriculum:
+                        # Reward + terminal at the scheduled radius from the pose we
+                        # have; the env's fixed-79px reward/termination is ignored.
+                        reward = float(reach_reward(pos_next, desired_goal, reach_radius))
+                        term   = reward > 0.5
+                    else:
+                        reward, term = env_reward, env_term
+                    macro_steps += 1
+                    self.total_env_steps += 1
+                    if term:
+                        break
                 next_obs     = self.process_observation(raw_next["observation"])
                 heading_next = r.angle
-                pos_next     = np.array([r.x, r.y], dtype=np.float32)
-                # motion at s' == velocity into s' + windowed net from history;
-                # ms.vec at the new pose reproduces it (history already holds the
-                # pose we just committed), so the windowed term comes for free.
                 motion_next  = ms.vec(pos_next[0], pos_next[1])
-                if use_reach_curriculum:
-                    # Recompute reward + terminal at the scheduled radius from the
-                    # pose we already have; the env's fixed-79px reward/termination
-                    # is ignored. Driving the rollout's `done` off this radius means
-                    # the robot keeps approaching past 79px -- gathering on-policy
-                    # data in the dead zone that the env would otherwise cut short.
-                    reward = float(reach_reward(pos_next, desired_goal, reach_radius))
-                    term   = reward > 0.5
-                else:
-                    reward, term = env_reward, env_term
                 done = term or trunc
 
                 # Store term (not trunc): a timeout is not a terminal state, so the
                 # target should still bootstrap from next_obs. Storing trunc as done
-                # trains Q toward 0 at far-from-goal states.
+                # trains Q toward 0 at far-from-goal states. action == the macro index;
+                # reward/term/pose are the macro's LANDING values (single-reward SMDP).
                 self.episode_buffer.store(
-                    obs, action, reward, next_obs, term,
+                    obs, macro, reward, next_obs, term,
                     achieved_prev=pos_prev,
                     achieved_next=pos_next,
                     heading_prev=heading_prev,
@@ -414,13 +441,12 @@ class Agent:
                     motion_next=motion_next,
                 )
                 episode_reward += float(reward)
-                episode_steps  += 1
-                self.total_env_steps += 1
+                episode_steps  += macro_steps
                 obs = next_obs
 
-                # UTD: fixed gradient updates per ENV step (not per episode), so
-                # the update-to-data ratio stays constant as episodes shorten.
-                for _ in range(self.updates_per_step):
+                # UTD: gradient updates per ENV step (a macro spent macro_steps of
+                # them), so the update-to-data ratio stays constant regardless of H.
+                for _ in range(self.updates_per_step * macro_steps):
                     if self.memory.can_sample(batch_size):
                         episode_loss += self.train_step(batch_size)
 

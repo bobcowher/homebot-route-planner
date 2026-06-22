@@ -10,12 +10,18 @@ class QModel(BaseModel):
                  goal_hidden=128, fc_hidden=512,
                  goal_layers=1, head_layers=1, head_norm=False,
                  use_motion=False, motion_in_dim=None, motion_hidden=32,
-                 motion_window=1):
+                 motion_window=1, macro_h=1, n_base=None):
         super(QModel, self).__init__()
         self.head_norm = head_norm
         self.use_motion = use_motion
         # Stored so eval can rebuild the matching MotionState off the checkpoint.
         self.motion_window = motion_window
+        # Macro-action head: the output is over length-macro_h sequences of n_base
+        # base actions (action_dim == n_base ** macro_h). Stored so every eval path
+        # can decode an output index back into base actions off the checkpoint.
+        # macro_h=1 == the original per-step head (n_base == action_dim).
+        self.macro_h = macro_h
+        self.n_base = n_base if n_base is not None else action_dim
 
         # Coordinate reframing: goals arrive as absolute coords
         # [robot_x, robot_y, goal_x, goal_y] in raw map pixels (default map
@@ -47,7 +53,8 @@ class QModel(BaseModel):
         if use_motion:
             if motion_in_dim is None:
                 from motion import motion_dim
-                motion_in_dim = motion_dim(action_dim, motion_window)
+                # motion one-hot is over BASE actions, not macros.
+                motion_in_dim = motion_dim(self.n_base, motion_window)
             self.motion_encoder = nn.Linear(motion_in_dim, motion_hidden)
             motion_feat = motion_hidden
 

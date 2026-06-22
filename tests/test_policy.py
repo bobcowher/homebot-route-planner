@@ -5,7 +5,25 @@ checkpoints with different Q magnitudes), and that it still prefers the best
 action (it's exploit-with-noise, not uniform exploration)."""
 import torch
 
-from policy import softmax_rel_probs
+from policy import softmax_rel_probs, decode_macro
+
+
+def test_decode_macro_round_trip():
+    """A macro index decodes to base-n_base digits (MSB first) and re-encodes back."""
+    n_base, H = 8, 3
+    for idx in (0, 1, 7, 8, 73, 511):
+        acts = decode_macro(idx, H, n_base)
+        assert len(acts) == H and all(0 <= a < n_base for a in acts)
+        re = 0
+        for a in acts:
+            re = re * n_base + a
+        assert re == idx
+
+
+def test_decode_macro_h1_is_identity():
+    """macro_h=1 reduces to [idx] -- the per-step policy is the H=1 special case."""
+    for idx in range(8):
+        assert decode_macro(idx, 1, 8) == [idx]
 
 
 def test_returns_valid_distribution():

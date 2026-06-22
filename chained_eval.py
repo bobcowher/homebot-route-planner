@@ -28,7 +28,7 @@ from homebot.goals import GOAL_NAMES, GOAL_THRESHOLD
 from evaluate import load_q_model, process_observation
 from goal_geometry import world_coords, distance, eval_step_budget
 from motion import MotionState
-from policy import softmax_rel_probs
+from policy import softmax_rel_probs, decode_macro
 from task_chain import DEFAULT_CHAIN, resolve_goal, world_state, leg_succeeded
 
 VALID_NAMES = set(GOAL_NAMES) | {"go_to_human"}
@@ -87,16 +87,24 @@ def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, r
     """
     robot = base._robot
     positions = [(robot.x, robot.y)]
-    for steps in range(1, budget + 1):
+    macro_h = getattr(model, "macro_h", 1)
+    n_base = getattr(model, "n_base", env.action_space.n)
+    steps = 0
+    while steps < budget:
         motion = ms.vec(robot.x, robot.y)
-        action = _select_action(model, obs, goal_xy, robot, device, readout, temp, motion)
-        ms.commit(robot.x, robot.y, action)
-        next_obs, _, _, _, _ = env.step(action)
-        obs = process_observation(next_obs)
-        positions.append((robot.x, robot.y))
-        if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
-            return True, steps, obs, positions
-    return False, budget, obs, positions
+        idx = _select_action(model, obs, goal_xy, robot, device, readout, temp, motion)
+        # Execute the decoded macro open-loop (macro_h=1 -> a single action), checking
+        # reach after every base step so a mid-macro arrival stops immediately.
+        for a in decode_macro(idx, macro_h, n_base):
+            ms.commit(robot.x, robot.y, a)
+            obs = process_observation(env.step(a)[0])
+            positions.append((robot.x, robot.y))
+            steps += 1
+            if distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= reach:
+                return True, steps, obs, positions
+            if steps >= budget:
+                break
+    return False, steps, obs, positions
 
 
 def run_chain(model, env, chain, device, readout, temp, seed, budget_mult=1.0):
