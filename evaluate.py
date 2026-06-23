@@ -44,10 +44,13 @@ def load_q_model(path, n_actions, device, goal_layers=1, head_layers=1, head_nor
     output head is n_actions ** macro_h; macro_h is read from the checkpoint meta when
     present so callers need not know it. The returned model carries macro_h / n_base
     so every eval path can decode an output index back to base actions."""
-    state = torch.load(path, map_location=device)
+    # weights_only=False: our own trusted checkpoints, and the best.pt meta can carry
+    # numpy scalars (gym's Discrete.n -> np.int64 in n_base) that the 2.6 default
+    # (weights_only=True) refuses to unpickle.
+    state = torch.load(path, map_location=device, weights_only=False)
     if "q_model" in state:  # best.pt wraps the state_dict with metadata
         print(f"  ({path} is a best-checkpoint from episode {state.get('episode')})")
-        macro_h = state.get("macro_h", macro_h)
+        macro_h = int(state.get("macro_h", macro_h))
         state = state["q_model"]
     model = QModel(action_dim=n_actions ** macro_h, goal_layers=goal_layers,
                    head_layers=head_layers, head_norm=head_norm,

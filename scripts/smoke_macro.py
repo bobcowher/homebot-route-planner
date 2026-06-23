@@ -61,6 +61,14 @@ def main():
                 chain_eval_interval=999, her_anneal_start=None)
     print("OK | macro train ran 3 episodes + chain_eval without crashing")
 
+    # Round-trip the saved best.pt through load_q_model -- guards the weights_only /
+    # numpy-scalar-in-meta bug (gym Discrete.n -> np.int64) that broke macro reload.
+    from evaluate import load_q_model
+    m = load_q_model("checkpoints/q_model_best.pt", agent.n_base, agent.device,
+                     goal_layers=2, head_layers=4, use_motion=True)
+    assert m.macro_h == 3 and m.output.out_features == 512, (m.macro_h, m.output.out_features)
+    print("OK | macro best.pt round-trips through load_q_model (512 head, macro_h=3 from meta)")
+
 
 if __name__ == "__main__":
     main()

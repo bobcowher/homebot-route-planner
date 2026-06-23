@@ -254,10 +254,12 @@ class Agent:
         path = "checkpoints/q_model_best.pt"
         torch.save({
             "q_model": self.q_model.state_dict(),
-            "episode": episode,
-            "chain_score": chain_score,
-            "macro_h": self.macro_h,
-            "n_base": self.n_base,
+            "episode": int(episode),
+            "chain_score": float(chain_score),
+            # native ints: gym's Discrete.n is np.int64, and a numpy scalar in the
+            # meta breaks torch.load's weights_only=True default on reload.
+            "macro_h": int(self.macro_h),
+            "n_base": int(self.n_base),
         }, path)
         print(f"  New best checkpoint saved (episode={episode}, chain_score={chain_score:.2f})")
 
