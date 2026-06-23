@@ -160,6 +160,9 @@ def main():
                    choices=["greedy", "softmax", "softmax_rel"],
                    help="action readout; macro models work at greedy (greedy==deploy)")
     p.add_argument("--temp", type=float, default=0.1, help="readout temperature")
+    p.add_argument("--terminal-radius", type=float, default=64.0,
+                   help="analytic final-approach servo within this px of a goal "
+                        "(fixes tight-reach convergence; 0 = off)")
     args = p.parse_args()
 
     from planner.navigator_tool import NavigatorTool
@@ -178,7 +181,7 @@ def main():
 
     nav = NavigatorTool(checkpoint=args.checkpoint, readout=args.readout,
                         temp=args.temp, render_mode=args.render_mode,
-                        head_norm=args.head_norm)
+                        head_norm=args.head_norm, terminal_radius=args.terminal_radius)
     agent = PlannerAgent(LLMClient(base_url=args.base_url, model=args.model), nav,
                          trace=trace)
     try:
