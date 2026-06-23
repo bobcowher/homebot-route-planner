@@ -24,11 +24,21 @@ env = gym.make(
 # single-reward-at-landing SMDP backup (gamma**3); 8 base actions (STOP deferred -> no
 # env change). Curriculum OFF (reach_start unset) to isolate the macro variable from
 # run 322 (the reach-gradient experiment) -- this is a parallel A/B.
-# Judge vs 314 (4.30/38% chain, 5.8% deploy spin) + run 322: chained_eval.py +
-# spin_metric. Watch spin drop and collect_trash reach climb -- and WATCH
-# overestimation (max over 512 actions amplifies positive bias; Double-DQN is on).
+# V2 STABILIZATION (run 323 v1 collapsed): v1 learned (greedy reach peaked 0.70 ~ep
+# 550) then diverged via VALUE OVERESTIMATION -- avg_q_loss blew up to ~6.9, reach
+# crashed to 0.05, chain 1.9->0.2. The max over 512 macros amplifies positive bias,
+# and the collapse tracked the HER anneal (her_anneal_start=600) stripping the dense
+# relabel grounding. Two targeted stabilizers, both pointing the same way:
+#   head_norm=True   -- LayerNorm in the head, there to curb overestimation
+#   her_anneal_start=None -- keep HER's grounding for the whole run (512 actions can't
+#                            afford to lose it). Keep H=3 (it showed life at H=3); if
+#                            this still collapses, drop to H=2 (64 actions) next.
+# Judge vs 314 (4.30/38% chain, 5.8% deploy spin): chained_eval.py + spin_metric.
+# WATCH avg_q_loss -- if it climbs again, overestimation isn't beaten and H=2 is next.
+# NOTE: head_norm=True -> post-hoc eval (load_q_model) must pass head_norm=True.
 agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
-              use_motion=True, motion_window=1, random_goal_tiles=True, macro_h=3)
+              head_norm=True, use_motion=True, motion_window=1,
+              random_goal_tiles=True, macro_h=3)
 
 agent.train(episodes=1800, batch_size=64, eval_interval=50, eval_episodes=20,
-            chain_eval_interval=10, her_anneal_start=600)
+            chain_eval_interval=10, her_anneal_start=None)
