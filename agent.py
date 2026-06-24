@@ -34,6 +34,7 @@ class Agent:
                        soft_alpha: float = 0.01,
                        softmax_behavior: bool = False,
                        softmax_behavior_temp: float = 0.1,
+                       min_epsilon: float = 0.1,
                        macro_h: int = 1) -> None:
         self.env = env
         # Soft-Q (entropy-regularized) value backup + softmax behavior policy.
@@ -128,7 +129,7 @@ class Agent:
 
         self.gamma = 0.99
         self.epsilon = 1.0
-        self.min_epsilon = 0.1
+        self.min_epsilon = min_epsilon
         self.epsilon_decay = 0.977
 
         self.target_update_interval = target_update_interval

@@ -19,6 +19,16 @@ import homebot
 # Clean A/B vs 314 (4.30/38% chain, 5.8% deploy spin) on the collect_trash leg:
 # chained_eval.py + spin_metric. her_anneal_start=None keeps HER's dense relabel
 # grounding the whole run (the tight 31px target needs it).
+#
+# ROLLOUT POLICY: softmax_behavior = softmax_rel @ temp 0.1 (the deploy readout),
+# NOT argmax. The champion trains epsilon-greedy argmax and only deploys softmax_rel,
+# so the Q-function never collected data under the policy we ship. This closes that
+# train/deploy mismatch AND attacks the transit limit-cycle problem at its source:
+# the greedy argmax on a flat far-field Q settles into A<->B 2-cycles that softmax
+# sampling breaks by drawing the 2nd-best action. epsilon is kept for early uniform
+# coverage (softmax_rel on a still-flat Q sharpens on noise), but min_epsilon=0 so
+# it anneals to ~0 by ~ep300 (0.977^300 < 0.001) and the rest of the run is pure
+# softmax_rel -- train == deploy.
 env = gym.make(
     "HomeBot2D-Goal-V1",
     render_mode="rgb_array",
@@ -32,7 +42,9 @@ env = gym.make(
 )
 
 agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
-              use_motion=True, motion_window=1)
+              use_motion=True, motion_window=1,
+              softmax_behavior=True, softmax_behavior_temp=0.1,
+              min_epsilon=0.0)
 
 agent.train(episodes=1800, batch_size=64, eval_interval=50, eval_episodes=20,
             chain_eval_interval=10, her_anneal_start=None)
