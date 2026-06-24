@@ -19,6 +19,17 @@ import homebot
 # Clean A/B vs 314 (4.30/38% chain, 5.8% deploy spin) on the collect_trash leg:
 # chained_eval.py + spin_metric. her_anneal_start=None keeps HER's dense relabel
 # grounding the whole run (the tight 31px target needs it).
+#
+# ROLLOUT POLICY: pure softmax @ temp 0.01, NOT softmax_rel or argmax. The Q
+# values ARE the probability distribution: P(a) = exp(q_a/tau) / Z. Exploration
+# is value-driven (a 0.2-Q action is picked 20% of the time, period) and
+# auto-anneals -- early flat Q -> near-uniform (explore), learned Q -> peaked
+# (exploit). Distance-aware for free: far states with flat Q stay explorative
+# (breaking transit limit cycles), near-goal states with peaked Q go greedy.
+# tau=0.01 is the absolute temp that scored 0.90 reach_rate on run-325's eval
+# (vs 0.45 at 0.025, 0.25 at 0.05). epsilon is kept for early uniform coverage
+# but min_epsilon=0 so it anneals to ~0 by ~ep300; the last ~1500 eps are pure
+# softmax. A/B vs the softmax-behavior branch (softmax_rel @ temp 0.1).
 env = gym.make(
     "HomeBot2D-Goal-V1",
     render_mode="rgb_array",
@@ -32,7 +43,9 @@ env = gym.make(
 )
 
 agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
-              use_motion=True, motion_window=1)
+              use_motion=True, motion_window=1,
+              softmax_behavior=True, softmax_behavior_temp=0.01,
+              min_epsilon=0.0)
 
 agent.train(episodes=1800, batch_size=64, eval_interval=50, eval_episodes=20,
             chain_eval_interval=10, her_anneal_start=None)

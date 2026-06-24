@@ -33,7 +33,8 @@ class Agent:
                        soft_q: bool = False,
                        soft_alpha: float = 0.01,
                        softmax_behavior: bool = False,
-                       softmax_behavior_temp: float = 0.1,
+                       softmax_behavior_temp: float = 0.01,
+                       min_epsilon: float = 0.1,
                        macro_h: int = 1) -> None:
         self.env = env
         # Soft-Q (entropy-regularized) value backup + softmax behavior policy.
@@ -128,7 +129,7 @@ class Agent:
 
         self.gamma = 0.99
         self.epsilon = 1.0
-        self.min_epsilon = 0.1
+        self.min_epsilon = min_epsilon
         self.epsilon_decay = 0.977
 
         self.target_update_interval = target_update_interval
@@ -193,12 +194,16 @@ class Agent:
         with torch.no_grad():
             q = self._q_forward(self.q_model, obs, goal, motion).squeeze(0)
             if self.softmax_behavior:
-                # softmax_rel: scale-invariant temperature = temp * per-state Q
-                # spread, identical to evaluate/spin_metric/chained_eval. Trains
-                # the exploit steps under the deployed policy. epsilon is kept for
-                # early uniform coverage (decays 1.0 -> 0.1); softmax_rel alone
-                # would sharpen on noise when Q is still flat.
-                probs = softmax_rel_probs(q, self.softmax_behavior_temp)
+                # Pure softmax: P(a) = exp(q_a/tau) / sum(exp(q/tau)). The Q
+                # values ARE the distribution -- exploration is value-driven and
+                # auto-anneals: early flat Q -> near-uniform (explore); learned Q
+                # -> peaked (exploit). Distance-aware for free: far states (flat
+                # Q) stay explorative, near-goal states (peaked Q) go greedy.
+                # tau is in Q's absolute units (not the scale-invariant fraction
+                # softmax_rel uses); 0.01 is the temp that scored 0.90 reach_rate
+                # on the run-325 checkpoint eval. epsilon is kept for early
+                # uniform coverage and anneals to 0 (~ep300).
+                probs = F.softmax(q / self.softmax_behavior_temp, dim=0)
                 return int(torch.multinomial(probs, 1).item())
             return int(q.argmax().item())
 
