@@ -152,7 +152,7 @@ def main():
     p.add_argument("--render-mode", default="human", choices=["human", "rgb_array"],
                    help="human opens a window so you can watch the robot drive")
     p.add_argument("--log-dir", default="logs", help="where to write the chat log")
-    p.add_argument("--checkpoint", default="checkpoints/run314_q_model_best.pt",
+    p.add_argument("--checkpoint", default="checkpoints/run325_q_model_best.pt",
                    help="navigator checkpoint to drive (e.g. a macro-action model)")
     p.add_argument("--head-norm", action="store_true",
                    help="required for LayerNorm checkpoints (the macro-action runs)")
@@ -160,9 +160,6 @@ def main():
                    choices=["greedy", "softmax", "softmax_rel"],
                    help="action readout; macro models work at greedy (greedy==deploy)")
     p.add_argument("--temp", type=float, default=0.1, help="readout temperature")
-    p.add_argument("--terminal-radius", type=float, default=64.0,
-                   help="analytic final-approach servo within this px of a goal "
-                        "(fixes tight-reach convergence; 0 = off)")
     args = p.parse_args()
 
     from planner.navigator_tool import NavigatorTool
@@ -181,7 +178,7 @@ def main():
 
     nav = NavigatorTool(checkpoint=args.checkpoint, readout=args.readout,
                         temp=args.temp, render_mode=args.render_mode,
-                        head_norm=args.head_norm, terminal_radius=args.terminal_radius)
+                        head_norm=args.head_norm)
     agent = PlannerAgent(LLMClient(base_url=args.base_url, model=args.model), nav,
                          trace=trace)
     try:

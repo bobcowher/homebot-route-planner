@@ -51,20 +51,6 @@ TRASH_REACH = 31.0
 REACH_OVERRIDE = {"go_to_door": DOOR_REACH, "collect_trash": TRASH_REACH}
 
 
-# Robot compass directions (homebot.robot._DIRS), action index -> unit (dx, dy).
-_DIRS = [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)]
-
-
-def analytic_action(rx, ry, gx, gy):
-    """The compass action whose direction best points at the goal (max dot product).
-    A deterministic final-approach servo toward the KNOWN goal pixel: reduces distance
-    every step and converges to ~4px, bypassing the learned-Q field's curl/orbit that
-    parks arbitrary goals ~30-64px out. Realism-clean -- dead-reckoning to a commanded
-    coordinate at close range (line of sight), what a real robot's docking servo does."""
-    vx, vy = gx - rx, gy - ry
-    return max(range(8), key=lambda a: _DIRS[a][0] * vx + _DIRS[a][1] * vy)
-
-
 def _select_action(model, obs, goal_xy, robot, device, readout, temp, motion):
     """One greedy/softmax action from the current obs + pose toward goal_xy."""
     with torch.no_grad():
@@ -90,18 +76,10 @@ def _select_action(model, obs, goal_xy, robot, device, readout, temp, motion):
         return int(q.argmax().item())
 
 
-def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, reach,
-            terminal_radius=0.0):
+def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, reach):
     """Drive the navigator toward goal_xy until reached or budget exhausted.
     ms is the per-episode MotionState (persists across legs); reach is the
     per-leg reach radius in px (tighter for the walk-on door than for fixtures).
-
-    terminal_radius>0: within that distance of the goal, hand off from the learned
-    policy to analytic_action (a final-approach servo toward the goal pixel). The
-    learned Q's greedy field orbits arbitrary goals ~30-64px out and can't close a
-    tight reach (trash 31px); the servo closes it. Only engages for tight-reach legs
-    (trash/door) -- fixtures' 79px reach fires before terminal_radius, so they're
-    untouched, and the servo never drives into a solid fixture.
 
     Returns (reached, steps, obs, positions). obs is threaded back out so the
     next leg continues from the live observation without an env reset. positions
@@ -113,15 +91,11 @@ def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, r
     n_base = getattr(model, "n_base", env.action_space.n)
     steps = 0
     while steps < budget:
-        if terminal_radius > 0 and \
-                distance(robot.x, robot.y, goal_xy[0], goal_xy[1]) <= terminal_radius:
-            actions = [analytic_action(robot.x, robot.y, goal_xy[0], goal_xy[1])]
-        else:
-            motion = ms.vec(robot.x, robot.y)
-            idx = _select_action(model, obs, goal_xy, robot, device, readout, temp, motion)
-            # Execute the decoded macro open-loop (macro_h=1 -> a single action),
-            # checking reach after every base step so a mid-macro arrival stops.
-            actions = decode_macro(idx, macro_h, n_base)
+        motion = ms.vec(robot.x, robot.y)
+        idx = _select_action(model, obs, goal_xy, robot, device, readout, temp, motion)
+        # Execute the decoded macro open-loop (macro_h=1 -> a single action),
+        # checking reach after every base step so a mid-macro arrival stops.
+        actions = decode_macro(idx, macro_h, n_base)
         for a in actions:
             ms.commit(robot.x, robot.y, a)
             obs = process_observation(env.step(a)[0])
@@ -134,8 +108,7 @@ def run_leg(model, env, base, obs, goal_xy, budget, device, readout, temp, ms, r
     return False, steps, obs, positions
 
 
-def run_chain(model, env, chain, device, readout, temp, seed, budget_mult=1.0,
-              terminal_radius=0.0):
+def run_chain(model, env, chain, device, readout, temp, seed, budget_mult=1.0):
     """Reset once, walk the chain leg-by-leg. Pose persists across legs; a failed
     leg does NOT abort the chain (we continue so we can see where it breaks).
 
@@ -163,8 +136,7 @@ def run_chain(model, env, chain, device, readout, temp, seed, budget_mult=1.0,
         reach = REACH_OVERRIDE.get(name, GOAL_THRESHOLD)
         before = world_state(base)
         arrived, steps, obs, positions = run_leg(model, env, base, obs, (gx, gy),
-                                                 budget, device, readout, temp, ms, reach,
-                                                 terminal_radius)
+                                                 budget, device, readout, temp, ms, reach)
         # Honest score: the leg counts only if the TASK actually happened (state
         # delta), not merely that the robot got near the coordinate.
         reached = leg_succeeded(name, before, world_state(base), arrived)
@@ -232,10 +204,6 @@ def main():
                         help="scale per-leg step budget (>1 relaxes the anti-circling cap)")
     parser.add_argument("--readouts", nargs="+", default=["greedy", "softmax"],
                         choices=["greedy", "softmax", "softmax_rel"])
-    parser.add_argument("--terminal-radius", type=float, default=0.0,
-                        help="within this px of a goal, hand off to the analytic "
-                             "final-approach servo (fixes tight-reach convergence; "
-                             "64 recommended, 0 = off)")
     args = parser.parse_args()
 
     bad = [n for n in args.chain if n not in VALID_NAMES]
@@ -267,8 +235,7 @@ def main():
     for readout in args.readouts:
         episodes_results = [
             run_chain(model, env, args.chain, device, readout, args.temp,
-                      seed=args.seed + i, budget_mult=args.budget_mult,
-                      terminal_radius=args.terminal_radius)
+                      seed=args.seed + i, budget_mult=args.budget_mult)
             for i in range(args.episodes)
         ]
         summary[readout] = _print_readout(readout, episodes_results, args.chain)

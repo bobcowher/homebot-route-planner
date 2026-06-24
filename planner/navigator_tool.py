@@ -15,9 +15,9 @@ from planner.world_model import WorldModel, DEST_TO_ENV
 
 
 class NavigatorTool:
-    def __init__(self, checkpoint="checkpoints/run314_q_model_best.pt",
+    def __init__(self, checkpoint="checkpoints/run325_q_model_best.pt",
                  readout="softmax_rel", temp=0.1, device=None,
-                 render_mode="rgb_array", head_norm=False, terminal_radius=64.0):
+                 render_mode="rgb_array", head_norm=False):
         # render_mode="human" opens a window and auto-shows every step (the env's
         # _get_obs draws to the window in human mode) -- used by the chat REPL so
         # you can watch the robot drive. Default "rgb_array" stays headless for
@@ -37,10 +37,6 @@ class NavigatorTool:
             checkpoint, self.env.action_space.n, self.device,
             goal_layers=2, head_layers=4, use_motion=True, head_norm=head_norm)
         self.readout, self.temp = readout, temp
-        # terminal_radius>0: hand off to the analytic final-approach servo within this
-        # px of the goal. Fixes the learned nav's tight-reach convergence (collect_trash
-        # 42->70%, full-chain 22->50% at 64px); only engages on tight-reach legs.
-        self.terminal_radius = terminal_radius
         self.obs = None
         self.ms = None
 
@@ -69,8 +65,7 @@ class NavigatorTool:
         # only for the spin metric, so discard it here.
         arrived, steps, self.obs, _ = run_leg(
             self.model, self.env, self.base, self.obs, (gx, gy),
-            budget, self.device, self.readout, self.temp, self.ms, reach,
-            self.terminal_radius)
+            budget, self.device, self.readout, self.temp, self.ms, reach)
         after = self.world.state()
         # "reached" = the task actually completed (state delta), not just that the
         # robot got near the coordinate. "arrived" exposes the raw proximity too.

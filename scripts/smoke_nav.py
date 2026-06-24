@@ -13,7 +13,7 @@ from planner.navigator_tool import NavigatorTool
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="checkpoints/run314_q_model_best.pt")
+    ap.add_argument("--checkpoint", default="checkpoints/run325_q_model_best.pt")
     ap.add_argument("--head-norm", action="store_true")
     ap.add_argument("--readout", default="softmax_rel")
     a = ap.parse_args()
