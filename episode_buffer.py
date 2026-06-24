@@ -4,7 +4,7 @@ import random
 import numpy as np
 import torch
 
-from goal_geometry import world_coords
+from goal_geometry import noisy_world_vector
 
 # Blocked-move (wall-pin) penalty. A discrete action always commands a move, so a
 # near-zero displacement between achieved_prev and achieved_next means the robot
@@ -84,12 +84,15 @@ class EpisodeBuffer:
         desired_goal: np.ndarray,
         compute_reward: Callable,
         k: float | None = None,
+        goal_noise_std: float = 0.0,
     ) -> None:
         """Write original transitions then k hindsight-relabeled copies.
 
-        Strategy: future. Goals stored as absolute coords
-        [robot_x, robot_y, goal_x, goal_y]; the robot-pose half is the pose at
-        that transition, the goal half is the (desired or hindsight) target.
+        Strategy: future. Goals stored as noisy world vectors
+        [dx, dy] + N(0, goal_noise_std²); the robot-pose half changes within a
+        transition as the robot moves, so each transition stores the noisy vector
+        at both s and s'. Noise is independent per call (realistic: each
+        localization is a fresh noisy estimate).
 
         `k` is the (possibly fractional) hindsight count per transition; defaults
         to the class K. The HER-curriculum anneals it 2 -> 0 over training, so a
@@ -101,10 +104,10 @@ class EpisodeBuffer:
 
         # Pass 1: original transitions (env reward, episode desired_goal)
         for t in self._transitions:
-            goal_at_s  = world_coords(t.achieved_prev[0], t.achieved_prev[1],
-                                      dg[0], dg[1])
-            goal_at_sp = world_coords(t.achieved_next[0], t.achieved_next[1],
-                                      dg[0], dg[1])
+            goal_at_s  = noisy_world_vector(t.achieved_prev[0], t.achieved_prev[1],
+                                            dg[0], dg[1], goal_noise_std)
+            goal_at_sp = noisy_world_vector(t.achieved_next[0], t.achieved_next[1],
+                                            dg[0], dg[1], goal_noise_std)
             replay_buffer.store_transition(
                 t.obs, t.action, t.reward + _blocked_penalty(t), t.next_obs, t.done,
                 goal_at_s, goal_at_sp,
@@ -136,10 +139,12 @@ class EpisodeBuffer:
                 # can't be a pin (reaching the goal required moving), so applying
                 # it before the done check is safe.
                 hindsight_reward += _blocked_penalty(t)
-                hs_goal_at_s  = world_coords(t.achieved_prev[0], t.achieved_prev[1],
-                                             hindsight_goal[0], hindsight_goal[1])
-                hs_goal_at_sp = world_coords(t.achieved_next[0], t.achieved_next[1],
-                                             hindsight_goal[0], hindsight_goal[1])
+                hs_goal_at_s  = noisy_world_vector(t.achieved_prev[0], t.achieved_prev[1],
+                                                   hindsight_goal[0], hindsight_goal[1],
+                                                   goal_noise_std)
+                hs_goal_at_sp = noisy_world_vector(t.achieved_next[0], t.achieved_next[1],
+                                                   hindsight_goal[0], hindsight_goal[1],
+                                                   goal_noise_std)
                 replay_buffer.store_transition(
                     t.obs, t.action, hindsight_reward, t.next_obs, hindsight_done,
                     hs_goal_at_s, hs_goal_at_sp,

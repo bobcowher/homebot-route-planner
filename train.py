@@ -19,6 +19,17 @@ import homebot
 # Clean A/B vs 314 (4.30/38% chain, 5.8% deploy spin) on the collect_trash leg:
 # chained_eval.py + spin_metric. her_anneal_start=None keeps HER's dense relabel
 # grounding the whole run (the tight 31px target needs it).
+#
+# GOAL REPRESENTATION: noisy world vector [dx, dy] + N(0, 30px²) instead of
+# absolute coords [robot_x, robot_y, goal_x, goal_y]. Relative displacement so
+# the network can't memorize a position→action lookup (the memorization path
+# that the coord rep left open). Gaussian noise (30px ≈ 1 tile ≈ ~47cm) simulates
+# the shaky-map reality and breaks the memorization key further — same position
+# gives a different noisy vector each visit, forcing a smooth "approach the goal"
+# skill rather than a lookup table. Hypothesis: this is the rep change that makes
+# the value field less flat far from goal (the root cause of transit cycles).
+# A/B vs 325 (absolute coords, no noise) on chained_eval + spin_metric + the new
+# maps Robert is building (generalization test).
 env = gym.make(
     "HomeBot2D-Goal-V1",
     render_mode="rgb_array",
@@ -32,7 +43,8 @@ env = gym.make(
 )
 
 agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
-              use_motion=True, motion_window=1)
+              use_motion=True, motion_window=1,
+              goal_noise_std=30.0)
 
 agent.train(episodes=1800, batch_size=64, eval_interval=50, eval_episodes=20,
             chain_eval_interval=10, her_anneal_start=None)

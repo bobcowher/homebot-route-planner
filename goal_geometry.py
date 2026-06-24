@@ -102,6 +102,30 @@ def world_vector(rx: float, ry: float, gx: float, gy: float) -> np.ndarray:
     return np.array([gx - rx, gy - ry], dtype=np.float32)
 
 
+def noisy_world_vector(rx: float, ry: float, gx: float, gy: float,
+                       noise_std: float = 0.0) -> np.ndarray:
+    """Goal displacement in the WORLD frame with Gaussian localization noise.
+
+    Returns [dx, dy] = [gx-rx, gy-ry] + N(0, noise_std²). noise_std=0 reproduces
+    world_vector exactly. The noise simulates the shaky-map reality: a real robot
+    has a vague position estimate, not a precise one, so the bearing/distance to
+    the goal is uncertain. This breaks the memorization key (same position gives
+    a different noisy vector each visit) and forces the network to learn a robust
+    approach skill rather than a position→action lookup.
+
+    30px ≈ 1 tile ≈ ~47cm — realistic for indoor localization without a tight
+    SLAM stack. At close range (31px trash collect) the noise dominates the
+    vector, which is itself realistic: close-range navigation should come from
+    the observation (visual servoing), not the noisy goal vector.
+    """
+    dx = gx - rx
+    dy = gy - ry
+    if noise_std > 0:
+        dx += float(np.random.randn() * noise_std)
+        dy += float(np.random.randn() * noise_std)
+    return np.array([dx, dy], dtype=np.float32)
+
+
 def world_coords(rx: float, ry: float, gx: float, gy: float) -> np.ndarray:
     """Goal as raw ABSOLUTE coordinates: [robot_x, robot_y, goal_x, goal_y].
 

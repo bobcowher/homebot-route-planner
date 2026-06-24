@@ -26,7 +26,7 @@ import torch.nn.functional as F
 import homebot  # noqa: F401  (side-effect env registration)
 from homebot.goals import GOAL_NAMES, GOAL_THRESHOLD
 from evaluate import load_q_model, process_observation
-from goal_geometry import world_coords, distance, eval_step_budget
+from goal_geometry import noisy_world_vector, distance, eval_step_budget
 from motion import MotionState
 from policy import softmax_rel_probs, decode_macro
 from task_chain import DEFAULT_CHAIN, resolve_goal, world_state, leg_succeeded
@@ -55,7 +55,8 @@ def _select_action(model, obs, goal_xy, robot, device, readout, temp, motion):
     """One greedy/softmax action from the current obs + pose toward goal_xy."""
     with torch.no_grad():
         obs_t = obs.unsqueeze(0).float().to(device) / 255.0
-        goal_vec = world_coords(robot.x, robot.y, goal_xy[0], goal_xy[1])
+        noise = getattr(model, "goal_noise_std", 0.0)
+        goal_vec = noisy_world_vector(robot.x, robot.y, goal_xy[0], goal_xy[1], noise)
         goal_t = torch.as_tensor(goal_vec, dtype=torch.float32,
                                  device=device).unsqueeze(0)
         motion_t = None

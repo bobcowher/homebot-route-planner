@@ -9,8 +9,8 @@ import cv2
 import datetime
 from buffer import ReplayBuffer
 from episode_buffer import EpisodeBuffer
-from goal_geometry import (world_coords, spin_fraction, spin_thresholds, SPIN_WINDOW,
-                           reach_reward, reach_radius_at)
+from goal_geometry import (noisy_world_vector, spin_fraction, spin_thresholds,
+                           SPIN_WINDOW, reach_reward, reach_radius_at)
 from motion import MotionState, motion_dim
 from models.q_model import QModel
 from policy import softmax_rel_probs, decode_macro
@@ -34,6 +34,8 @@ class Agent:
                        soft_alpha: float = 0.01,
                        softmax_behavior: bool = False,
                        softmax_behavior_temp: float = 0.1,
+                       min_epsilon: float = 0.1,
+                       goal_noise_std: float = 0.0,
                        macro_h: int = 1) -> None:
         self.env = env
         # Soft-Q (entropy-regularized) value backup + softmax behavior policy.
@@ -75,8 +77,14 @@ class Agent:
         self.macro_h = macro_h
         self.n_actions = self.n_base ** macro_h
 
-        # Coordinate reframing: goal is [robot_x, robot_y, goal_x, goal_y].
-        self.goal_dim = 4
+        # Goal representation: noisy world vector [dx, dy] + N(0, noise_std²).
+        # Relative displacement (not absolute coords) so the network can't
+        # memorize a position→action lookup. Gaussian noise simulates the shaky-
+        # map reality and breaks the memorization key further — same position
+        # gives a different noisy vector each visit, forcing a smooth "approach
+        # the goal" skill. noise_std=0 reproduces clean world_vector.
+        self.goal_noise_std = goal_noise_std
+        self.goal_dim = 2
 
         # Previous-motion input (anti-oscillation): last action + velocity, so the
         # net can tell "approaching" from "stuck/reversing" (position alone can't).
@@ -95,10 +103,14 @@ class Agent:
             motion_dim=self.motion_dim,
         )
 
+        # goal_scale normalizes the goal vector to ~[-1, 1]: map dims for [dx, dy].
+        goal_scale = (864.0, 576.0) if self.goal_dim == 2 else (864.0, 576.0, 864.0, 576.0)
+
         self.q_model = QModel(
             action_dim=self.n_actions,
             input_shape=obs.shape,
             goal_dim=self.goal_dim,
+            goal_scale=goal_scale,
             goal_layers=goal_layers,
             head_layers=head_layers,
             head_norm=head_norm,
@@ -108,11 +120,13 @@ class Agent:
             macro_h=macro_h,
             n_base=self.n_base,
         ).to(self.device)
+        self.q_model.goal_noise_std = goal_noise_std
 
         self.target_q_model = QModel(
             action_dim=self.n_actions,
             input_shape=obs.shape,
             goal_dim=self.goal_dim,
+            goal_scale=goal_scale,
             goal_layers=goal_layers,
             head_layers=head_layers,
             head_norm=head_norm,
@@ -260,6 +274,8 @@ class Agent:
             # meta breaks torch.load's weights_only=True default on reload.
             "macro_h": int(self.macro_h),
             "n_base": int(self.n_base),
+            "goal_dim": int(self.goal_dim),
+            "goal_noise_std": float(self.goal_noise_std),
         }, path)
         print(f"  New best checkpoint saved (episode={episode}, chain_score={chain_score:.2f})")
 
@@ -282,8 +298,9 @@ class Agent:
             done = False
             ep_reward = 0.0
             while not done:
-                goal_vec = world_coords(r.x, r.y,
-                                        desired_goal[0], desired_goal[1])
+                goal_vec = noisy_world_vector(r.x, r.y,
+                                              desired_goal[0], desired_goal[1],
+                                              self.goal_noise_std)
                 motion = ms.vec(r.x, r.y)
                 with torch.no_grad():
                     macro = self._q_forward(self.q_model, obs, goal_vec, motion).argmax(dim=1).item()
@@ -396,8 +413,9 @@ class Agent:
             while not done:
                 heading_prev = r.angle
                 pos_prev     = np.array([r.x, r.y], dtype=np.float32)
-                goal_vec     = world_coords(r.x, r.y,
-                                            desired_goal[0], desired_goal[1])
+                goal_vec     = noisy_world_vector(r.x, r.y,
+                                                 desired_goal[0], desired_goal[1],
+                                                 self.goal_noise_std)
                 motion_prev  = ms.vec(r.x, r.y)
                 macro        = self.select_action(obs, goal_vec, motion_prev)
 
@@ -471,6 +489,7 @@ class Agent:
                 desired_goal=desired_goal,
                 compute_reward=her_reward,
                 k=k_eff,
+                goal_noise_std=self.goal_noise_std,
             )
             self.episode_buffer.clear()
             writer.add_scalar("Train/hindsight_k", k_eff, episode)
@@ -528,8 +547,9 @@ class Agent:
             while not done:
                 with torch.no_grad():
                     obs_t  = obs.unsqueeze(0).float().to(self.device) / 255.0
-                    goal_vec = world_coords(pos[0], pos[1],
-                                            desired_goal[0], desired_goal[1])
+                    goal_vec = noisy_world_vector(pos[0], pos[1],
+                                                  desired_goal[0], desired_goal[1],
+                                                  self.goal_noise_std)
                     goal_t = torch.as_tensor(goal_vec, dtype=torch.float32,
                                              device=self.device).unsqueeze(0)
                     action = self.q_model(obs_t, goal_t).argmax(dim=1).item()

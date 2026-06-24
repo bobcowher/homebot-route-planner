@@ -18,7 +18,7 @@ import gymnasium as gym
 import torch
 
 import homebot  # noqa: F401  (side-effect env registration)
-from goal_geometry import world_coords
+from goal_geometry import noisy_world_vector
 from motion import MotionState
 from models.q_model import QModel
 
@@ -39,11 +39,13 @@ def make_env():
 
 
 def load_q_model(path, n_actions, device, goal_layers=1, head_layers=1, head_norm=False,
-                 use_motion=False, motion_window=1, macro_h=1):
+                 use_motion=False, motion_window=1, macro_h=1, goal_dim=None,
+                 goal_noise_std=0.0):
     """n_actions is the BASE action count. For a macro checkpoint (macro_h>1) the
     output head is n_actions ** macro_h; macro_h is read from the checkpoint meta when
-    present so callers need not know it. The returned model carries macro_h / n_base
-    so every eval path can decode an output index back to base actions."""
+    present so callers need not know it. The returned model carries macro_h / n_base /
+    goal_noise_std so every eval path can decode an output index back to base actions
+    and apply the matching goal-vector noise."""
     # weights_only=False: our own trusted checkpoints, and the best.pt meta can carry
     # numpy scalars (gym's Discrete.n -> np.int64 in n_base) that the 2.6 default
     # (weights_only=True) refuses to unpickle.
@@ -51,12 +53,20 @@ def load_q_model(path, n_actions, device, goal_layers=1, head_layers=1, head_nor
     if "q_model" in state:  # best.pt wraps the state_dict with metadata
         print(f"  ({path} is a best-checkpoint from episode {state.get('episode')})")
         macro_h = int(state.get("macro_h", macro_h))
+        goal_dim = int(state.get("goal_dim", goal_dim or 4))
+        goal_noise_std = float(state.get("goal_noise_std", goal_noise_std))
         state = state["q_model"]
-    model = QModel(action_dim=n_actions ** macro_h, goal_layers=goal_layers,
-                   head_layers=head_layers, head_norm=head_norm,
+    else:
+        goal_dim = goal_dim or 4
+    goal_scale = (864.0, 576.0) if goal_dim == 2 else (864.0, 576.0, 864.0, 576.0)
+    model = QModel(action_dim=n_actions ** macro_h, goal_dim=goal_dim,
+                   goal_scale=goal_scale,
+                   goal_layers=goal_layers, head_layers=head_layers,
+                   head_norm=head_norm,
                    use_motion=use_motion, motion_window=motion_window,
                    macro_h=macro_h, n_base=n_actions).to(device)
     model.load_state_dict(state)
+    model.goal_noise_std = goal_noise_std
     model.eval()
     return model
 
@@ -91,8 +101,9 @@ def evaluate(model, env, episodes, device, epsilon=0.0):
                 with torch.no_grad():
                     obs_t = obs.unsqueeze(0).float().to(device) / 255.0
                     # Coord rep: [robot_x, robot_y, goal_x, goal_y], pose updates each step.
-                    goal_vec = world_coords(pos[0], pos[1],
-                                            desired_goal[0], desired_goal[1])
+                    goal_vec = noisy_world_vector(pos[0], pos[1],
+                                                  desired_goal[0], desired_goal[1],
+                                                  getattr(model, "goal_noise_std", 0.0))
                     goal_t = torch.as_tensor(
                         goal_vec, dtype=torch.float32, device=device
                     ).unsqueeze(0)
