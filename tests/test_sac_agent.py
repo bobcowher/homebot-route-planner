@@ -91,3 +91,40 @@ def test_mean_q_stays_bounded_over_repeated_updates():
     # within 100 steps on a tiny network -- this bound is intentionally loose
     # so it only fails on gross divergence, not normal training noise.
     assert all(abs(q) < 50 for q in mean_qs[-10:])
+
+
+def test_policy_loss_sign_moves_mean_toward_higher_q_actions():
+    """Isolates the policy_loss sign specifically: replaces the critic with a
+    frozen, hand-built Q function that has an unambiguous preference for one
+    action, then runs several policy-only gradient steps (the same formula
+    update_parameters uses) and checks the policy's mean output moves TOWARD
+    the preferred action. A sign-flipped policy_loss would move it away
+    instead. This is deterministic and isolates just the sign, unlike a
+    many-step Q-divergence check."""
+    agent = SACAgent(env=FakeEnv(), state_dim=6, action_dim=2, max_buffer_size=1000, hidden_dim=32)
+
+    target_action = torch.tensor([0.8, -0.8], device=agent.device)
+
+    def fixed_critic_forward(state, action):
+        q = -((action - target_action) ** 2).sum(dim=1, keepdim=True)
+        return q, q.clone()
+
+    agent.critic.forward = fixed_critic_forward
+
+    state = torch.zeros(1, 6, device=agent.device)
+    mean_before = agent.policy.forward(state)[0].detach().clone()
+
+    for _ in range(50):
+        pi, log_pi, _ = agent.policy.sample(state)
+        q1_pi, q2_pi = agent.critic(state, pi)
+        min_q_pi = torch.min(q1_pi, q2_pi)
+        policy_loss = (agent.alpha * log_pi - min_q_pi).mean()
+        agent.policy_optim.zero_grad()
+        policy_loss.backward()
+        agent.policy_optim.step()
+
+    mean_after = agent.policy.forward(state)[0].detach().clone()
+
+    dist_before = (mean_before - target_action).abs().sum()
+    dist_after = (mean_after - target_action).abs().sum()
+    assert dist_after < dist_before
