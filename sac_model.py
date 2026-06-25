@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 LOG_SIG_MAX = 2
-LOG_SIG_MIN = -20
+LOG_SIG_MIN = -4
 epsilon = 1e-6
 
 

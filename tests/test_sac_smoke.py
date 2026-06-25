@@ -33,7 +33,7 @@ def test_smoke_few_episodes_no_nan_no_crash():
     agent = SACAgent(env=env, state_dim=state_dim, action_dim=2,
                      max_buffer_size=5000, hidden_dim=32)
 
-    agent.train(episodes=5, batch_size=16, run_tag="smoke-test")
+    agent.train(episodes=5, batch_size=16, run_tag="smoke-test", warmup_steps=0)
 
     assert agent.total_env_steps > 0
     assert math.isfinite(agent.policy.linear1.weight.sum().item())

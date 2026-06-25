@@ -112,9 +112,43 @@ class SACAgent:
         except Exception:
             return 'unknown'
 
-    def train(self, episodes=1800, batch_size=64, run_tag=None):
+    def train(self, episodes=1800, batch_size=64, run_tag=None, warmup_steps=5000):
         run_tag = run_tag or self._run_tag()
         writer = SummaryWriter(f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
+
+        warmup_done = 0
+        while warmup_done < warmup_steps:
+            raw_obs, _ = self.env.reset()
+            base = self.env.unwrapped
+            r = base._robot
+            desired_goal = raw_obs["desired_goal"]
+            ms = MotionStateContinuous(self.motion_window)
+            done = False
+            while not done:
+                heading_prev = r.angle
+                pos_prev = np.array([r.x, r.y], dtype=np.float32)
+                motion_prev = ms.vec(r.x, r.y)
+                action = self.env.action_space.sample()
+                ms.commit(r.x, r.y, action)
+                _, reward, term, trunc, _ = self.env.step(action)
+                pos_next = np.array([r.x, r.y], dtype=np.float32)
+                heading_next = r.angle
+                motion_next = ms.vec(pos_next[0], pos_next[1])
+                done = term or trunc
+                self.total_env_steps += 1
+                warmup_done += 1
+                self.episode_buffer.store(
+                    action, reward, term,
+                    achieved_prev=pos_prev, achieved_next=pos_next,
+                    heading_prev=heading_prev, heading_next=heading_next,
+                    motion_prev=motion_prev, motion_next=motion_next,
+                )
+            self.episode_buffer.send_to(
+                self.memory, desired_goal=desired_goal, compute_reward=base.compute_reward,
+            )
+            self.episode_buffer.clear()
+        if warmup_steps > 0:
+            print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
             raw_obs, _ = self.env.reset()
