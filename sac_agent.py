@@ -1,7 +1,15 @@
-"""Continuous SAC agent for HomeBotGoalEnv. Engine (select_action,
-update_parameters) ported from sac-fetch/agent.py; train() is a new HER
-training loop wiring sac_episode_buffer + sac_motion onto HomeBotGoalEnv's
-continuous action_mode."""
+"""CNN-based SAC agent for HomeBotGoalEnv (continuous action mode).
+
+Observation pipeline matches the DQN champion:
+  - Image: 96x96 RGB → resize → permute(2,0,1) → uint8 tensor
+  - Goal:  noisy_world_vector(rx, ry, gx, gy, noise_std=30) → [dx, dy] float32
+  - Motion: [last_linear, last_angular, dx, dy] float32
+
+SAC engine (select_action, update_parameters) ported from sac-fetch/agent.py;
+train() is a new HER training loop wiring sac_episode_buffer + sac_motion onto
+HomeBotGoalEnv's continuous action_mode.
+"""
+import cv2
 import datetime
 import os
 import subprocess
@@ -12,7 +20,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from goal_geometry import ego_vector
+from goal_geometry import noisy_world_vector
 from sac_buffer import SACReplayBuffer
 from sac_episode_buffer import SACEpisodeBuffer
 from sac_model import Critic, Policy
@@ -20,82 +28,109 @@ from sac_motion import MotionStateContinuous
 
 
 class SACAgent:
-    def __init__(self, env, state_dim, action_dim, max_buffer_size=200000,
-                 hidden_dim=128, gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
-                 motion_window=1):
+    def __init__(self, env, action_dim=2, max_buffer_size=200000,
+                 gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
+                 motion_window=1, goal_noise_std=30.0):
         self.env = env
-        self.state_dim = state_dim
         self.action_dim = action_dim
         self.gamma = gamma
         self.tau = tau
         self.alpha = alpha
         self.motion_window = motion_window
+        self.goal_noise_std = goal_noise_std
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
 
-        self.critic = Critic(state_dim, action_dim, hidden_dim, name="sac_critic").to(self.device)
-        self.critic_target = Critic(state_dim, action_dim, hidden_dim, name="sac_critic_target").to(self.device)
+        self.critic = Critic(action_dim, name="sac_critic").to(self.device)
+        self.critic_target = Critic(action_dim, name="sac_critic_target").to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_optim = Adam(self.critic.parameters(), lr=lr)
 
-        self.policy = Policy(state_dim, action_dim, hidden_dim, env.action_space, name="sac_policy").to(self.device)
+        self.policy = Policy(action_dim, env.action_space, name="sac_policy").to(self.device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
 
-        self.memory = SACReplayBuffer(max_buffer_size, state_dim, action_dim)
+        self.memory = SACReplayBuffer(max_buffer_size, action_dim, device=str(self.device))
         self.episode_buffer = SACEpisodeBuffer()
 
         self.total_env_steps = 0
         self.total_grad_steps = 0
 
-    def select_action(self, state, evaluate=False):
-        state_t = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+    # ------------------------------------------------------------------
+    # Observation pipeline (mirrors DQN agent.process_observation)
+    # ------------------------------------------------------------------
+
+    def process_observation(self, obs_hwc):
+        """(H, W, 3) uint8 ndarray → (3, H, W) uint8 torch.Tensor."""
+        obs_hwc = cv2.resize(obs_hwc, (96, 96), interpolation=cv2.INTER_NEAREST)
+        return torch.from_numpy(obs_hwc).permute(2, 0, 1)
+
+    def _to_device_float(self, img_tensor):
+        """(3,96,96) uint8 tensor → (1,3,96,96) float [0,1] on device."""
+        return img_tensor.unsqueeze(0).float().to(self.device) / 255.0
+
+    def _goal_tensor(self, goal_np):
+        return torch.as_tensor(goal_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+    def _motion_tensor(self, motion_np):
+        return torch.as_tensor(motion_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+    # ------------------------------------------------------------------
+    # Action selection
+    # ------------------------------------------------------------------
+
+    def select_action(self, obs_tensor, goal_np, motion_np, evaluate=False):
+        img  = self._to_device_float(obs_tensor)
+        goal = self._goal_tensor(goal_np)
+        mot  = self._motion_tensor(motion_np)
         if not evaluate:
-            action, _, _ = self.policy.sample(state_t)
+            action, _, _ = self.policy.sample(img, goal, mot)
         else:
-            _, _, action = self.policy.sample(state_t)
+            _, _, action = self.policy.sample(img, goal, mot)
         return action.detach().cpu().numpy()[0]
 
-    def update_parameters(self, batch_size):
-        state, action, reward, next_state, done = self.memory.sample_buffer(batch_size)
+    # ------------------------------------------------------------------
+    # SAC update
+    # ------------------------------------------------------------------
 
-        state = torch.FloatTensor(state).to(self.device)
-        next_state = torch.FloatTensor(next_state).to(self.device)
-        action = torch.FloatTensor(action).to(self.device)
-        reward = torch.FloatTensor(reward).to(self.device).unsqueeze(1)
-        mask = torch.FloatTensor(1.0 - done.astype(np.float32)).to(self.device).unsqueeze(1)
+    def update_parameters(self, batch_size):
+        imgs, goals, motions, actions, rewards, \
+        next_imgs, next_goals, next_motions, dones = self.memory.sample_buffer(batch_size)
+
+        rewards = rewards.unsqueeze(1)
+        mask    = (~dones).float().unsqueeze(1)
 
         with torch.no_grad():
-            next_action, next_log_pi, _ = self.policy.sample(next_state)
-            q1_next, q2_next = self.critic_target(next_state, next_action)
+            next_a, next_log_pi, _ = self.policy.sample(next_imgs, next_goals, next_motions)
+            q1_next, q2_next = self.critic_target(next_imgs, next_goals, next_motions, next_a)
             min_q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_pi
-            next_q = reward + mask * self.gamma * min_q_next
+            next_q = rewards + mask * self.gamma * min_q_next
 
-        q1, q2 = self.critic(state, action)
+        q1, q2 = self.critic(imgs, goals, motions, actions)
         critic_loss = F.mse_loss(q1, next_q) + F.mse_loss(q2, next_q)
         self.critic_optim.zero_grad()
         critic_loss.backward()
         self.critic_optim.step()
 
-        pi, log_pi, _ = self.policy.sample(state)
-        q1_pi, q2_pi = self.critic(state, pi)
+        pi, log_pi, _ = self.policy.sample(imgs, goals, motions)
+        q1_pi, q2_pi = self.critic(imgs, goals, motions, pi)
         min_q_pi = torch.min(q1_pi, q2_pi)
         policy_loss = (self.alpha * log_pi - min_q_pi).mean()
         self.policy_optim.zero_grad()
         policy_loss.backward()
         self.policy_optim.step()
 
-        for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        for target_p, p in zip(self.critic_target.parameters(), self.critic.parameters()):
+            target_p.data.copy_(self.tau * p.data + (1 - self.tau) * target_p.data)
 
         self.total_grad_steps += 1
         mean_q = torch.min(q1, q2).mean().item()
         return critic_loss.item(), policy_loss.item(), mean_q
 
-    def _build_state(self, rx, ry, rtheta, gx, gy, motion):
-        goal_vec = ego_vector(rx, ry, rtheta, gx, gy)
-        return np.concatenate([goal_vec, motion]).astype(np.float32)
+    # ------------------------------------------------------------------
+    # Run-tag detection (branch-derived, per CLAUDE.md)
+    # ------------------------------------------------------------------
 
     def _run_tag(self):
         try:
@@ -112,107 +147,92 @@ class SACAgent:
         except Exception:
             return 'unknown'
 
-    def train(self, episodes=1800, batch_size=64, run_tag=None, warmup_steps=5000):
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
+
+    def _run_episode(self, collect_only=False, batch_size=64):
+        """Run one episode. If collect_only=True, use random actions (warmup)."""
+        raw_obs, _ = self.env.reset()
+        base = self.env.unwrapped
+        r = base._robot
+        desired_goal = raw_obs["desired_goal"]
+        ms = MotionStateContinuous(self.motion_window)
+        obs = self.process_observation(raw_obs["observation"])
+
+        done = False
+        episode_reward = 0.0
+        episode_steps = 0
+        critic_loss_sum = policy_loss_sum = mean_q_sum = 0.0
+        update_count = 0
+
+        while not done:
+            pos_prev = np.array([r.x, r.y], dtype=np.float32)
+            motion_prev = ms.vec(r.x, r.y)
+            goal_prev = noisy_world_vector(r.x, r.y, desired_goal[0], desired_goal[1],
+                                           self.goal_noise_std)
+
+            if collect_only:
+                action = self.env.action_space.sample()
+            else:
+                action = self.select_action(obs, goal_prev, motion_prev)
+
+            ms.commit(r.x, r.y, action)
+            raw_next, reward, term, trunc, _ = self.env.step(action)
+            next_obs = self.process_observation(raw_next["observation"])
+
+            pos_next = np.array([r.x, r.y], dtype=np.float32)
+            motion_next = ms.vec(pos_next[0], pos_next[1])
+            done = term or trunc
+            self.total_env_steps += 1
+
+            self.episode_buffer.store(
+                obs, next_obs, action, reward, term,
+                achieved_prev=pos_prev, achieved_next=pos_next,
+                motion_prev=motion_prev, motion_next=motion_next,
+            )
+            episode_reward += float(reward)
+            episode_steps += 1
+            obs = next_obs
+
+            if not collect_only and self.memory.can_sample(batch_size):
+                cl, pl, mq = self.update_parameters(batch_size)
+                critic_loss_sum += cl
+                policy_loss_sum += pl
+                mean_q_sum += mq
+                update_count += 1
+
+        self.episode_buffer.send_to(
+            self.memory, desired_goal=desired_goal,
+            compute_reward=base.compute_reward,
+            goal_noise_std=self.goal_noise_std,
+        )
+        self.episode_buffer.clear()
+        return episode_reward, episode_steps, critic_loss_sum, policy_loss_sum, mean_q_sum, update_count
+
+    def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000):
         run_tag = run_tag or self._run_tag()
         writer = SummaryWriter(f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
 
         warmup_done = 0
         while warmup_done < warmup_steps:
-            raw_obs, _ = self.env.reset()
-            base = self.env.unwrapped
-            r = base._robot
-            desired_goal = raw_obs["desired_goal"]
-            ms = MotionStateContinuous(self.motion_window)
-            done = False
-            while not done:
-                heading_prev = r.angle
-                pos_prev = np.array([r.x, r.y], dtype=np.float32)
-                motion_prev = ms.vec(r.x, r.y)
-                action = self.env.action_space.sample()
-                ms.commit(r.x, r.y, action)
-                _, reward, term, trunc, _ = self.env.step(action)
-                pos_next = np.array([r.x, r.y], dtype=np.float32)
-                heading_next = r.angle
-                motion_next = ms.vec(pos_next[0], pos_next[1])
-                done = term or trunc
-                self.total_env_steps += 1
-                warmup_done += 1
-                self.episode_buffer.store(
-                    action, reward, term,
-                    achieved_prev=pos_prev, achieved_next=pos_next,
-                    heading_prev=heading_prev, heading_next=heading_next,
-                    motion_prev=motion_prev, motion_next=motion_next,
-                )
-            self.episode_buffer.send_to(
-                self.memory, desired_goal=desired_goal, compute_reward=base.compute_reward,
-            )
-            self.episode_buffer.clear()
+            ep_reward, ep_steps, *_ = self._run_episode(collect_only=True, batch_size=batch_size)
+            warmup_done += ep_steps
         if warmup_steps > 0:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
-            raw_obs, _ = self.env.reset()
-            base = self.env.unwrapped
-            r = base._robot
-            desired_goal = raw_obs["desired_goal"]
-            ms = MotionStateContinuous(self.motion_window)
+            ep_reward, ep_steps, cl_sum, pl_sum, mq_sum, n_updates = \
+                self._run_episode(collect_only=False, batch_size=batch_size)
 
-            done = False
-            episode_reward = 0.0
-            episode_steps = 0
-            critic_loss_sum = policy_loss_sum = mean_q_sum = 0.0
-            update_count = 0
+            writer.add_scalar("Train/episode_reward", ep_reward, episode)
+            writer.add_scalar("Train/episode_steps",  ep_steps,  episode)
+            if n_updates > 0:
+                writer.add_scalar("loss/critic",     cl_sum / n_updates, episode)
+                writer.add_scalar("loss/policy",     pl_sum / n_updates, episode)
+                writer.add_scalar("Train/mean_q",    mq_sum / n_updates, episode)
 
-            while not done:
-                heading_prev = r.angle
-                pos_prev = np.array([r.x, r.y], dtype=np.float32)
-                motion_prev = ms.vec(r.x, r.y)
-                state = self._build_state(r.x, r.y, r.angle,
-                                          desired_goal[0], desired_goal[1], motion_prev)
-
-                action = self.select_action(state)
-                ms.commit(r.x, r.y, action)
-                _, reward, term, trunc, _ = self.env.step(action)
-
-                pos_next = np.array([r.x, r.y], dtype=np.float32)
-                heading_next = r.angle
-                motion_next = ms.vec(pos_next[0], pos_next[1])
-                done = term or trunc
-                self.total_env_steps += 1
-
-                # Store term (not trunc): a timeout isn't a terminal state, so the
-                # target should still bootstrap from next_state.
-                self.episode_buffer.store(
-                    action, reward, term,
-                    achieved_prev=pos_prev, achieved_next=pos_next,
-                    heading_prev=heading_prev, heading_next=heading_next,
-                    motion_prev=motion_prev, motion_next=motion_next,
-                )
-                episode_reward += float(reward)
-                episode_steps += 1
-
-                if self.memory.can_sample(batch_size):
-                    critic_loss, policy_loss, mean_q = self.update_parameters(batch_size)
-                    critic_loss_sum += critic_loss
-                    policy_loss_sum += policy_loss
-                    mean_q_sum += mean_q
-                    update_count += 1
-
-            self.episode_buffer.send_to(
-                self.memory, desired_goal=desired_goal, compute_reward=base.compute_reward,
-            )
-            self.episode_buffer.clear()
-
-            writer.add_scalar("Train/episode_reward", episode_reward, episode)
-            writer.add_scalar("Train/episode_steps", episode_steps, episode)
-            if update_count > 0:
-                writer.add_scalar("loss/critic", critic_loss_sum / update_count, episode)
-                writer.add_scalar("loss/policy", policy_loss_sum / update_count, episode)
-                # The literal failure signature from goal_reacher_overestimation.md --
-                # watch this for runaway growth, not the reward curve.
-                writer.add_scalar("Train/mean_q", mean_q_sum / update_count, episode)
-
-            print(f"Episode {episode} | reward: {episode_reward:.2f} | steps: {episode_steps}")
+            print(f"Episode {episode} | reward: {ep_reward:.2f} | steps: {ep_steps}")
 
             if episode % 50 == 0:
                 self.save_checkpoint()

@@ -9,19 +9,26 @@ def _action_space():
                           high=np.array([1., 1.], dtype=np.float32), dtype=np.float32)
 
 
+def _inputs(batch=8):
+    image  = torch.rand(batch, 3, 96, 96)
+    goal   = torch.rand(batch, 2)
+    motion = torch.rand(batch, 4)
+    action = torch.rand(batch, 2)
+    return image, goal, motion, action
+
+
 def test_critic_forward_shapes():
-    critic = Critic(num_inputs=6, num_actions=2, hidden_dim=128)
-    state = torch.randn(8, 6)
-    action = torch.randn(8, 2)
-    q1, q2 = critic(state, action)
+    critic = Critic(action_dim=2)
+    image, goal, motion, action = _inputs()
+    q1, q2 = critic(image, goal, motion, action)
     assert q1.shape == (8, 1)
     assert q2.shape == (8, 1)
 
 
 def test_policy_sample_shapes_and_action_bounds():
-    policy = Policy(num_inputs=6, num_actions=2, hidden_dim=128, action_space=_action_space())
-    state = torch.randn(8, 6)
-    action, log_prob, mean = policy.sample(state)
+    policy = Policy(action_dim=2, action_space=_action_space())
+    image, goal, motion, _ = _inputs()
+    action, log_prob, mean = policy.sample(image, goal, motion)
     assert action.shape == (8, 2)
     assert log_prob.shape == (8, 1)
     assert mean.shape == (8, 2)
@@ -29,8 +36,8 @@ def test_policy_sample_shapes_and_action_bounds():
 
 
 def test_policy_sample_is_stochastic():
-    policy = Policy(num_inputs=6, num_actions=2, hidden_dim=128, action_space=_action_space())
-    state = torch.randn(1, 6)
-    a1, _, _ = policy.sample(state)
-    a2, _, _ = policy.sample(state)
+    policy = Policy(action_dim=2, action_space=_action_space())
+    image, goal, motion, _ = _inputs(batch=1)
+    a1, _, _ = policy.sample(image, goal, motion)
+    a2, _, _ = policy.sample(image, goal, motion)
     assert not torch.allclose(a1, a2)

@@ -1,15 +1,16 @@
 import numpy as np
+import torch
 from sac_episode_buffer import SACEpisodeBuffer
-from goal_geometry import ego_vector
 
 
 class FakeReplayBuffer:
-    """Captures store_transition calls for assertion instead of a real buffer."""
     def __init__(self):
         self.calls = []
 
-    def store_transition(self, state, action, reward, next_state, done):
-        self.calls.append((state, action, reward, next_state, done))
+    def store_transition(self, image, goal, motion, action, reward,
+                         next_image, next_goal, next_motion, done):
+        self.calls.append((image, goal, motion, action, reward,
+                           next_image, next_goal, next_motion, done))
 
 
 def fake_compute_reward(achieved, desired, info):
@@ -18,65 +19,80 @@ def fake_compute_reward(achieved, desired, info):
     return (dist <= 31.0).astype(np.float32)
 
 
+def _obs():
+    return torch.zeros(3, 96, 96, dtype=torch.uint8)
+
+
+def _motion():
+    return np.zeros(4, dtype=np.float32)
+
+
 def test_empty_buffer_sends_nothing():
     eb = SACEpisodeBuffer()
     rb = FakeReplayBuffer()
-    eb.send_to(rb, desired_goal=np.array([0.0, 0.0]), compute_reward=fake_compute_reward)
+    eb.send_to(rb, desired_goal=np.array([0.0, 0.0]),
+               compute_reward=fake_compute_reward, goal_noise_std=0.0)
     assert rb.calls == []
 
 
-def test_single_transition_real_goal_state_matches_ego_vector():
+def test_single_transition_real_goal_is_world_displacement():
     eb = SACEpisodeBuffer()
-    motion = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    obs = _obs()
     eb.store(
-        action=np.array([1.0, 0.0]), reward=0.0, done=False,
-        achieved_prev=np.array([100.0, 100.0]), achieved_next=np.array([104.0, 100.0]),
-        heading_prev=0.0, heading_next=0.0,
-        motion_prev=motion, motion_next=motion,
+        obs=obs, next_obs=obs, action=np.array([1.0, 0.0], dtype=np.float32),
+        reward=0.0, done=False,
+        achieved_prev=np.array([100.0, 100.0]),
+        achieved_next=np.array([104.0, 100.0]),
+        motion_prev=_motion(), motion_next=_motion(),
     )
     rb = FakeReplayBuffer()
     desired_goal = np.array([200.0, 100.0])
-    eb.send_to(rb, desired_goal=desired_goal, compute_reward=fake_compute_reward, k=0)
+    eb.send_to(rb, desired_goal=desired_goal, compute_reward=fake_compute_reward,
+               goal_noise_std=0.0, k=0)
 
     assert len(rb.calls) == 1
-    state, action, reward, next_state, done = rb.calls[0]
-    expected_goal = ego_vector(100.0, 100.0, 0.0, 200.0, 100.0)
-    assert np.allclose(state[:2], expected_goal)
-    assert np.allclose(state[2:], motion)
-    assert reward == 0.0
-    assert done is False
+    _, goal, _, _, _, _, next_goal, _, _ = rb.calls[0]
+    # goal = noisy_world_vector(100,100, 200,100, noise=0) = [100, 0]
+    assert np.allclose(goal, [200.0 - 100.0, 100.0 - 100.0])
+    # next_goal = noisy_world_vector(104,100, 200,100, noise=0) = [96, 0]
+    assert np.allclose(next_goal, [200.0 - 104.0, 100.0 - 100.0])
 
 
 def test_hindsight_relabel_produces_terminal_success():
     eb = SACEpisodeBuffer()
-    motion = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-    # Step 0: far from any goal.
-    eb.store(action=np.array([1.0, 0.0]), reward=0.0, done=False,
-             achieved_prev=np.array([0.0, 0.0]), achieved_next=np.array([10.0, 0.0]),
-             heading_prev=0.0, heading_next=0.0, motion_prev=motion, motion_next=motion)
-    # Step 1: lands exactly on what step 0 will be relabeled toward.
-    eb.store(action=np.array([1.0, 0.0]), reward=0.0, done=False,
-             achieved_prev=np.array([10.0, 0.0]), achieved_next=np.array([20.0, 0.0]),
-             heading_prev=0.0, heading_next=0.0, motion_prev=motion, motion_next=motion)
+    obs = _obs()
+    # Step 0: robot (0,0) → (10,0)
+    eb.store(obs=obs, next_obs=obs, action=np.array([1.0, 0.0], dtype=np.float32),
+             reward=0.0, done=False,
+             achieved_prev=np.array([0.0, 0.0]),
+             achieved_next=np.array([10.0, 0.0]),
+             motion_prev=_motion(), motion_next=_motion())
+    # Step 1: robot (10,0) → (20,0)
+    eb.store(obs=obs, next_obs=obs, action=np.array([1.0, 0.0], dtype=np.float32),
+             reward=0.0, done=False,
+             achieved_prev=np.array([10.0, 0.0]),
+             achieved_next=np.array([20.0, 0.0]),
+             motion_prev=_motion(), motion_next=_motion())
 
     rb = FakeReplayBuffer()
-    # k=1 forces exactly one hindsight relabel per eligible transition.
-    eb.send_to(rb, desired_goal=np.array([999.0, 999.0]), compute_reward=fake_compute_reward, k=1)
+    # k=1: step 0 gets one hindsight goal = t1.achieved_next = (20,0)
+    # dist([10,0], [20,0]) = 10 < 31 → reward=1.0, done=True
+    eb.send_to(rb, desired_goal=np.array([999.0, 999.0]),
+               compute_reward=fake_compute_reward, goal_noise_std=0.0, k=1)
 
-    # 2 original + 1 hindsight (only step 0 has a future transition to sample from).
-    assert len(rb.calls) == 3
-    hindsight_call = rb.calls[-1]
-    _, _, reward, _, done = hindsight_call
-    assert reward == 1.0  # achieved_next (10,0) == hindsight goal (20,0)'s achieved_next? see below
+    assert len(rb.calls) == 3  # 2 real + 1 hindsight
+    _, _, _, _, reward, _, _, _, done = rb.calls[-1]
+    assert reward == 1.0
     assert done is True
 
 
 def test_clear_empties_buffer():
     eb = SACEpisodeBuffer()
-    eb.store(action=np.array([0.0, 0.0]), reward=0.0, done=False,
-             achieved_prev=np.array([0.0, 0.0]), achieved_next=np.array([0.0, 0.0]),
-             heading_prev=0.0, heading_next=0.0,
-             motion_prev=np.zeros(4), motion_next=np.zeros(4))
+    obs = _obs()
+    eb.store(obs=obs, next_obs=obs, action=np.zeros(2, dtype=np.float32),
+             reward=0.0, done=False,
+             achieved_prev=np.zeros(2), achieved_next=np.zeros(2),
+             motion_prev=_motion(), motion_next=_motion())
     assert len(eb) == 1
     eb.clear()
     assert len(eb) == 0

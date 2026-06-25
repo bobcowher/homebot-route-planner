@@ -1,13 +1,13 @@
-# train_sac.py
-"""Continuous SAC + HER on the collect_trash leg. Stability-first v1: no
-image observation, no n-step, no macro-actions, no goal noise. Mirrors
-train.py's collect_trash config (n_trash=1, random_start=True) so this is
-a clean A/B against the discrete champion's reference run, modulo algorithm."""
+"""Continuous SAC + HER on the collect_trash leg.
+
+CNN-based policy: image (96×96 RGB) + noisy_world_vector goal + motion.
+Mirrors train.py's collect_trash config (n_trash=1, random_start=True)
+so this is a clean A/B against the discrete champion, modulo algorithm.
+"""
 import gymnasium as gym
 import homebot  # noqa: F401
 
 from sac_agent import SACAgent
-from sac_motion import motion_dim_continuous
 
 env = gym.make(
     "HomeBot2D-Goal-V1",
@@ -21,10 +21,16 @@ env = gym.make(
     random_start=True,
 )
 
-STATE_DIM = 2 + motion_dim_continuous(window=1)  # ego_vector(2) + motion(4)
+agent = SACAgent(
+    env=env,
+    action_dim=2,
+    max_buffer_size=200000,
+    gamma=0.99,
+    tau=0.005,
+    alpha=0.1,
+    lr=3e-4,
+    motion_window=1,
+    goal_noise_std=30.0,
+)
 
-agent = SACAgent(env=env, state_dim=STATE_DIM, action_dim=2,
-                 max_buffer_size=200000, hidden_dim=128,
-                 gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4, motion_window=1)
-
-agent.train(episodes=1800, batch_size=64)
+agent.train(episodes=900, batch_size=64, warmup_steps=5000)

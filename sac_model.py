@@ -1,8 +1,15 @@
-"""Vanilla double-Q SAC actor/critic, ported from sac-fetch/model.py unchanged.
+"""CNN-based double-Q SAC actor/critic for HomeBotGoalEnv.
 
-No image input, no goal-encoder branch -- the goal is already folded into the
-flat state vector (ego_vector + motion) by sac_episode_buffer.py before it
-ever reaches these networks.
+Architecture mirrors the DQN champion (QModel): shared CNN structure across
+Policy and Critic (separate weights), goal encoder (2-layer, 128 hidden),
+motion encoder (linear, 32), combined head feeding the actor/critic outputs.
+
+Inputs per forward call:
+  image : (B, 3, 96, 96) float32 in [0, 1]  — normalized from uint8
+  goal  : (B, 2)          float32             — noisy_world_vector [dx, dy]
+  motion: (B, 4)          float32             — [last_linear, last_angular, dx, dy]
+
+For Critic, action (B, action_dim) is additionally concatenated into the head.
 """
 import os
 
@@ -15,88 +22,137 @@ LOG_SIG_MAX = 2
 LOG_SIG_MIN = -4
 epsilon = 1e-6
 
+GOAL_SCALE = (864.0, 576.0)   # default map dims; normalises dx,dy to ~[-1,1]
+GOAL_HIDDEN = 128
+MOTION_HIDDEN = 32
+HEAD_HIDDEN = 256              # per-layer width in the combined head
+CNN_FLAT = 4096                # 64 * 8 * 8  (verified below via dummy forward)
 
-def weights_init_(m):
-    if isinstance(m, nn.Linear):
-        torch.nn.init.xavier_uniform_(m.weight, gain=1)
-        torch.nn.init.constant_(m.bias, 0)
+
+def _conv_forward(x, conv1, conv2, conv3):
+    x = F.relu(conv1(x))
+    x = F.relu(conv2(x))
+    x = F.relu(conv3(x))
+    return x.flatten(1)
 
 
-class Critic(nn.Module):
-    def __init__(self, num_inputs, num_actions, hidden_dim, checkpoint_dir='checkpoints', name='q_network'):
-        super(Critic, self).__init__()
+class _CNNBase(nn.Module):
+    """Shared CNN + goal-encoder + motion-encoder scaffolding."""
 
-        self.linear1 = nn.Linear(num_inputs + num_actions, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.output1 = nn.Linear(hidden_dim, 1)
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
-        self.linear4 = nn.Linear(num_inputs + num_actions, hidden_dim)
-        self.linear5 = nn.Linear(hidden_dim, hidden_dim)
-        self.output2 = nn.Linear(hidden_dim, 1)
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 96, 96)
+            self._conv_flat = _conv_forward(dummy, self.conv1, self.conv2, self.conv3).shape[1]
 
-        self.name = name
+        self.goal_scale = nn.Parameter(
+            torch.tensor(GOAL_SCALE, dtype=torch.float32), requires_grad=False)
+        self.goal_enc1 = nn.Linear(2, GOAL_HIDDEN)
+        self.goal_enc2 = nn.Linear(GOAL_HIDDEN, GOAL_HIDDEN)
+
+        self.motion_enc = nn.Linear(4, MOTION_HIDDEN)
+
+    @property
+    def feature_dim(self):
+        return self._conv_flat + GOAL_HIDDEN + MOTION_HIDDEN
+
+    def _extract(self, image, goal, motion):
+        img_flat = _conv_forward(image, self.conv1, self.conv2, self.conv3)
+        g = goal / self.goal_scale
+        g = F.relu(self.goal_enc1(g))
+        g = self.goal_enc2(g)
+        m = F.relu(self.motion_enc(motion))
+        return torch.cat([img_flat, g, m], dim=1)
+
+
+class Critic(_CNNBase):
+    def __init__(self, action_dim, checkpoint_dir='checkpoints', name='sac_critic'):
+        super().__init__()
         self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name)
+        self.name = name
+        self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        self.apply(weights_init_)
+        head_in = self.feature_dim + action_dim
+        self.q1_fc1 = nn.Linear(head_in, HEAD_HIDDEN)
+        self.q1_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q1_out = nn.Linear(HEAD_HIDDEN, 1)
 
-    def forward(self, state, action):
-        xu = torch.cat([state, action], 1)
+        self.q2_fc1 = nn.Linear(head_in, HEAD_HIDDEN)
+        self.q2_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q2_out = nn.Linear(HEAD_HIDDEN, 1)
 
-        x1 = F.relu(self.linear1(xu))
-        x1 = F.relu(self.linear2(x1))
-        x1 = self.output1(x1)
+        self.apply(self._weights_init)
 
-        x2 = F.relu(self.linear4(xu))
-        x2 = F.relu(self.linear5(x2))
-        x2 = self.output2(x2)
+    @staticmethod
+    def _weights_init(m):
+        if isinstance(m, (nn.Linear, nn.Conv2d)):
+            nn.init.xavier_uniform_(m.weight, gain=1)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
-        return x1, x2
+    def forward(self, image, goal, motion, action):
+        feat = self._extract(image, goal, motion)
+        x = torch.cat([feat, action], dim=1)
+        q1 = F.relu(self.q1_fc1(x))
+        q1 = F.relu(self.q1_fc2(q1))
+        q1 = self.q1_out(q1)
+
+        q2 = F.relu(self.q2_fc1(x))
+        q2 = F.relu(self.q2_fc2(q2))
+        q2 = self.q2_out(q2)
+        return q1, q2
 
     def save_checkpoint(self):
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
         torch.save(self.state_dict(), self.checkpoint_file)
 
     def load_checkpoint(self):
-        self.load_state_dict(torch.load(self.checkpoint_file))
+        self.load_state_dict(torch.load(self.checkpoint_file, weights_only=True))
 
 
-class Policy(nn.Module):
-    def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None,
-                 checkpoint_dir='checkpoints', name='policy_network'):
-        super(Policy, self).__init__()
-
-        self.linear1 = nn.Linear(num_inputs, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-
-        self.mean_linear = nn.Linear(hidden_dim, num_actions)
-        self.log_std_linear = nn.Linear(hidden_dim, num_actions)
-
-        self.name = name
+class Policy(_CNNBase):
+    def __init__(self, action_dim, action_space=None, checkpoint_dir='checkpoints', name='sac_policy'):
+        super().__init__()
         self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name)
+        self.name = name
+        self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        self.apply(weights_init_)
+        self.fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
+        self.fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.mean_fc = nn.Linear(HEAD_HIDDEN, action_dim)
+        self.log_std_fc = nn.Linear(HEAD_HIDDEN, action_dim)
 
-        if action_space is None:
-            self.action_scale = torch.tensor(1.)
-            self.action_bias = torch.tensor(0.)
+        if action_space is not None:
+            high = torch.FloatTensor(action_space.high)
+            low  = torch.FloatTensor(action_space.low)
+            self.action_scale = nn.Parameter((high - low) / 2.0, requires_grad=False)
+            self.action_bias  = nn.Parameter((high + low) / 2.0, requires_grad=False)
         else:
-            self.action_scale = torch.FloatTensor(
-                (action_space.high - action_space.low) / 2.)
-            self.action_bias = torch.FloatTensor(
-                (action_space.high + action_space.low) / 2.)
+            self.action_scale = nn.Parameter(torch.ones(action_dim), requires_grad=False)
+            self.action_bias  = nn.Parameter(torch.zeros(action_dim), requires_grad=False)
 
-    def forward(self, state):
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
-        mean = self.mean_linear(x)
-        log_std = self.log_std_linear(x)
-        log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        self.apply(self._weights_init)
+
+    @staticmethod
+    def _weights_init(m):
+        if isinstance(m, (nn.Linear, nn.Conv2d)):
+            nn.init.xavier_uniform_(m.weight, gain=1)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, image, goal, motion):
+        feat = self._extract(image, goal, motion)
+        x = F.relu(self.fc1(feat))
+        x = F.relu(self.fc2(x))
+        mean = self.mean_fc(x)
+        log_std = self.log_std_fc(x).clamp(LOG_SIG_MIN, LOG_SIG_MAX)
         return mean, log_std
 
-    def sample(self, state):
-        mean, log_std = self.forward(state)
+    def sample(self, image, goal, motion):
+        mean, log_std = self.forward(image, goal, motion)
         std = log_std.exp()
         normal = Normal(mean, std)
         x_t = normal.rsample()
@@ -105,17 +161,11 @@ class Policy(nn.Module):
         log_prob = normal.log_prob(x_t)
         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
         log_prob = log_prob.sum(1, keepdim=True)
-        mean = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean
-
-    def to(self, device):
-        self.action_scale = self.action_scale.to(device)
-        self.action_bias = self.action_bias.to(device)
-        return super(Policy, self).to(device)
+        mean_action = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action, log_prob, mean_action
 
     def save_checkpoint(self):
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
         torch.save(self.state_dict(), self.checkpoint_file)
 
     def load_checkpoint(self):
-        self.load_state_dict(torch.load(self.checkpoint_file))
+        self.load_state_dict(torch.load(self.checkpoint_file, weights_only=True))
