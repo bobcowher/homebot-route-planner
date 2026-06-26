@@ -35,4 +35,13 @@ agent = SACAgent(
 # Warmup: fill the buffer with random transitions before any gradient update,
 # so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
 # (the run-334 mean_q -> 104 divergence). 5k random steps.
-agent.train(episodes=900, batch_size=64, warmup_steps=5000)
+#
+# Success-radius curriculum: bounded-alpha SAC stays stable but doesn't *learn* —
+# random walks almost never hit the 79px goal, so the critic gets no real reward and
+# the policy never commits (run 337: reward stuck at 0, entropy ~1.9). Start with a
+# big 200px reach radius so real goal-reward floods the critic early, then anneal to
+# the env's 79px over the first 600 episodes (hold 79 after). Reaching also terminates
+# episodes, which further tames the soft-value entropy bonus.
+agent.train(episodes=900, batch_size=64, warmup_steps=5000,
+            reach_start=200.0, reach_end=79.0,
+            reach_anneal_start=0, reach_anneal_end=600)

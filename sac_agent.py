@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from goal_geometry import noisy_world_vector
+from goal_geometry import noisy_world_vector, reach_reward, reach_radius_at
 from sac_buffer import SACReplayBuffer
 from sac_episode_buffer import SACEpisodeBuffer
 from sac_model import DiscreteQNet, DiscretePolicy
@@ -211,7 +211,14 @@ class SACAgent:
     # Training loop
     # ------------------------------------------------------------------
 
-    def _run_episode(self, collect_only=False, batch_size=64):
+    def _run_episode(self, collect_only=False, batch_size=64, reach_radius=None):
+        # reach_radius (success-radius curriculum): when set, the rollout reward and
+        # terminal are recomputed at this radius from the robot pose, overriding the
+        # env's fixed 79px — a big early radius floods real goal-reward into the critic
+        # (random walks "reach" often), then shrinks toward the env spec. Episodes also
+        # terminate on reach, which stops the soft-value entropy bonus from accumulating
+        # over the full 1000-step horizon. reach_radius=None preserves env behavior.
+        use_curriculum = reach_radius is not None
         raw_obs, _ = self.env.reset()
         base = self.env.unwrapped
         r = base._robot
@@ -237,11 +244,16 @@ class SACAgent:
                 action = self.select_action(obs, goal_prev, motion_prev)
 
             ms.commit(r.x, r.y, action)
-            raw_next, reward, term, trunc, _ = self.env.step(action)
+            raw_next, env_reward, env_term, trunc, _ = self.env.step(action)
             next_obs = self.process_observation(raw_next["observation"])
 
             pos_next    = np.array([r.x, r.y], dtype=np.float32)
             motion_next = ms.vec(pos_next[0], pos_next[1])
+            if use_curriculum:
+                reward = float(reach_reward(pos_next, desired_goal, reach_radius))
+                term   = reward > 0.5
+            else:
+                reward, term = env_reward, env_term
             done = term or trunc
             self.total_env_steps += 1
 
@@ -262,15 +274,29 @@ class SACAgent:
                 entropy_sum     += ent
                 update_count    += 1
 
+        # HER reward: at the curriculum radius when active (so relabeled goals score
+        # at the same radius the rollout terminated on), else the env's fixed bar.
+        her_reward = (
+            (lambda a, d, info: reach_reward(a, d, reach_radius))
+            if use_curriculum else base.compute_reward
+        )
         self.episode_buffer.send_to(
             self.memory, desired_goal=desired_goal,
-            compute_reward=base.compute_reward,
+            compute_reward=her_reward,
             goal_noise_std=self.goal_noise_std,
         )
         self.episode_buffer.clear()
         return episode_reward, episode_steps, critic_loss_sum, actor_loss_sum, mean_q_sum, entropy_sum, update_count
 
-    def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000):
+    def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000,
+              reach_start=None, reach_end=None,
+              reach_anneal_start=0, reach_anneal_end=None):
+        # Success-radius curriculum (optional): the per-episode reach/terminal radius
+        # anneals reach_start -> reach_end over [anneal_start, anneal_end]. reach_start
+        # None preserves the env's fixed-79px reward/termination exactly.
+        use_curriculum = reach_start is not None
+        if use_curriculum and reach_anneal_end is None:
+            reach_anneal_end = episodes
         run_tag = run_tag or self._run_tag()
         writer  = SummaryWriter(
             f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
@@ -283,11 +309,19 @@ class SACAgent:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
+            reach_radius = (
+                reach_radius_at(episode, reach_start, reach_end,
+                                reach_anneal_start, reach_anneal_end)
+                if use_curriculum else None
+            )
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
-                self._run_episode(collect_only=False, batch_size=batch_size)
+                self._run_episode(collect_only=False, batch_size=batch_size,
+                                  reach_radius=reach_radius)
 
             writer.add_scalar("Train/episode_reward",  ep_reward, episode)
             writer.add_scalar("Train/episode_steps",   ep_steps,  episode)
+            if use_curriculum:
+                writer.add_scalar("Train/reach_radius", reach_radius, episode)
             if n_updates > 0:
                 writer.add_scalar("loss/critic",           cl_sum  / n_updates, episode)
                 writer.add_scalar("loss/actor",            al_sum  / n_updates, episode)
@@ -295,8 +329,9 @@ class SACAgent:
                 writer.add_scalar("Train/policy_entropy",  ent_sum / n_updates, episode)
                 writer.add_scalar("Train/alpha",           self.alpha, episode)
 
+            radius_str = f" | radius: {reach_radius:.0f}" if use_curriculum else ""
             print(f"Episode {episode} | reward: {ep_reward:.2f} | "
-                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}")
+                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}{radius_str}")
 
             if episode % 50 == 0:
                 self.save_checkpoint()
