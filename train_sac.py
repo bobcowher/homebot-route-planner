@@ -67,13 +67,11 @@ agent = SACAgent(
 # so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
 # (the run-334 mean_q -> 104 divergence). 5k random steps.
 #
-# Start-distance curriculum (ADAPTIVE — the exploration fix): the discrete policy moves
-# 4px/step, so a random walk only diffuses ~126px over a 1000-step episode — far spawns
-# are physically unreachable and yield no learning signal (run 337/338: reward ~0, the
-# agent only "won" when randomly spawned inside the goal). Spawn the robot CLOSE to the
-# goal (120px) so navigation is short enough to actually reach, then expand the spawn
-# distance toward the full map only once the agent clears a 60% reach-rate at the current
-# distance (a fixed schedule outran learning in run 339). Uses the env's normal 79px reward.
-agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
-            start_dist_start=120.0, start_dist_max=900.0, start_dist_step=15.0,
-            start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0)
+# NO start-distance curriculum. HER IS the curriculum: relabeling to achieved goals trains
+# the agent on goals it actually reached (automatically easy-first, shrinking as it improves),
+# so it learns goal-conditioned navigation from local moves without ever reaching the true
+# goal — exactly how the DQN champion learned far-spawn reaching with random_start + HER and
+# no start curriculum. The earlier diffusion argument for a curriculum was wrong for HER, and
+# every no-curriculum SAC run (334/337) was under-capacity (2x256). This is the clean test:
+# the champion recipe with the one proven SAC change (4x512 critic) + HER + env random_start.
+agent.train(episodes=1200, batch_size=64, warmup_steps=5000)
