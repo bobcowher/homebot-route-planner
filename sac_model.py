@@ -25,7 +25,14 @@ LOG_SIG_MIN = -4   # kept for reference, not used in discrete policy
 GOAL_SCALE  = (864.0, 576.0)
 GOAL_HIDDEN = 128
 MOTION_HIDDEN = 32
-HEAD_HIDDEN = 256
+# Head depth/width matched to the DQN champion (QModel head_layers=4, fc_hidden=512).
+# The champion deliberately needed depth-4 to represent a value field that isn't flat
+# far from the goal (train.py: "the root cause of transit cycles"); the original SAC
+# port used a 2x256 head, which is both under-capacity for that value field and easily
+# normalised into mush. No LayerNorm — the champion ran head_norm=False and was stable;
+# LN was a patch for the undersized critic and it killed the Q-spread (run 345).
+HEAD_HIDDEN = 512
+HEAD_LAYERS = 4
 CNN_FLAT    = 4096   # 64 * 8 * 8  (verified via dummy forward)
 
 
@@ -34,6 +41,17 @@ def _conv_forward(x, conv1, conv2, conv3):
     x = F.relu(conv2(x))
     x = F.relu(conv3(x))
     return x.flatten(1)
+
+
+def _mlp_head(in_dim, hidden, n_layers):
+    """A stack of n_layers Linear(->hidden); caller applies ReLU after each and its own
+    output projection. Mirrors QModel's head ModuleList (the depth lever for the coord
+    value field)."""
+    layers, d = nn.ModuleList(), in_dim
+    for _ in range(n_layers):
+        layers.append(nn.Linear(d, hidden))
+        d = hidden
+    return layers
 
 
 class _CNNBase(nn.Module):
@@ -82,40 +100,31 @@ class DiscreteQNet(_CNNBase):
     Critic loss indexes into the vector with the taken action via .gather().
     """
 
-    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_critic'):
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_critic',
+                 head_layers=HEAD_LAYERS, head_hidden=HEAD_HIDDEN):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        # LayerNorm after each critic hidden layer (before ReLU). This is the standard
-        # cure for value overestimation: it constrains the pre-activation distribution
-        # so the critic can't extrapolate to extreme Q on out-of-distribution inputs,
-        # bounding the deadly-triad divergence (runs 342/343: mean_q->200, loss->1e6)
-        # WITHOUT shrinking the discount/reward signal the way lowering gamma did
-        # (run 344 killed learning). Applied only to the critic, not the policy.
-        self.q1_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
-        self.q1_ln1 = nn.LayerNorm(HEAD_HIDDEN)
-        self.q1_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.q1_ln2 = nn.LayerNorm(HEAD_HIDDEN)
-        self.q1_out = nn.Linear(HEAD_HIDDEN, n_actions)
-
-        self.q2_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
-        self.q2_ln1 = nn.LayerNorm(HEAD_HIDDEN)
-        self.q2_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.q2_ln2 = nn.LayerNorm(HEAD_HIDDEN)
-        self.q2_out = nn.Linear(HEAD_HIDDEN, n_actions)
+        # Double-Q: two independent head_layers-deep MLP heads over the shared feature.
+        self.q1 = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        self.q1_out = nn.Linear(head_hidden, n_actions)
+        self.q2 = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        self.q2_out = nn.Linear(head_hidden, n_actions)
 
         self.apply(self._weights_init)
 
     def forward(self, image, goal, motion):
         feat = self._extract(image, goal, motion)
-        q1 = F.relu(self.q1_ln1(self.q1_fc1(feat)))
-        q1 = F.relu(self.q1_ln2(self.q1_fc2(q1)))
+        q1 = feat
+        for layer in self.q1:
+            q1 = F.relu(layer(q1))
         q1 = self.q1_out(q1)   # (B, n_actions)
 
-        q2 = F.relu(self.q2_ln1(self.q2_fc1(feat)))
-        q2 = F.relu(self.q2_ln2(self.q2_fc2(q2)))
+        q2 = feat
+        for layer in self.q2:
+            q2 = F.relu(layer(q2))
         q2 = self.q2_out(q2)   # (B, n_actions)
         return q1, q2
 
@@ -134,22 +143,24 @@ class DiscretePolicy(_CNNBase):
     get_action() samples or argmaxes for exploration / evaluation.
     """
 
-    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_policy'):
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_policy',
+                 head_layers=HEAD_LAYERS, head_hidden=HEAD_HIDDEN):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        self.fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
-        self.fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.out = nn.Linear(HEAD_HIDDEN, n_actions)
+        # Same head depth/width as the critic (symmetric), matching the champion's 4x512.
+        self.fc = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        self.out = nn.Linear(head_hidden, n_actions)
 
         self.apply(self._weights_init)
 
     def forward(self, image, goal, motion):
         feat = self._extract(image, goal, motion)
-        x = F.relu(self.fc1(feat))
-        x = F.relu(self.fc2(x))
+        x = feat
+        for layer in self.fc:
+            x = F.relu(layer(x))
         logits = self.out(x)
         probs     = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)

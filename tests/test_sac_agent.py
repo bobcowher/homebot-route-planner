@@ -58,9 +58,9 @@ def test_update_parameters_runs_without_nan_and_returns_four_floats():
 def test_update_parameters_changes_policy_weights():
     agent = _make_agent()
     _fill_buffer(agent, 200)
-    before = agent.policy.fc1.weight.clone().detach()
+    before = agent.policy.fc[0].weight.clone().detach()
     agent.update_parameters(batch_size=16)
-    after = agent.policy.fc1.weight.clone().detach()
+    after = agent.policy.fc[0].weight.clone().detach()
     assert not torch.allclose(before, after)
 
 
@@ -68,10 +68,10 @@ def test_polyak_target_update_moves_toward_online_not_away():
     agent = _make_agent(tau=0.1)
     _fill_buffer(agent, 200)
 
-    target_before = agent.critic_target.q1_fc1.weight.clone().detach()
+    target_before = agent.critic_target.q1[0].weight.clone().detach()
     agent.update_parameters(batch_size=16)
-    online_after  = agent.critic.q1_fc1.weight.clone().detach()
-    target_after  = agent.critic_target.q1_fc1.weight.clone().detach()
+    online_after  = agent.critic.q1[0].weight.clone().detach()
+    target_after  = agent.critic_target.q1[0].weight.clone().detach()
 
     expected = agent.tau * online_after + (1 - agent.tau) * target_before
     assert torch.allclose(target_after, expected, atol=1e-6)
