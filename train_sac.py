@@ -29,15 +29,13 @@ env = gym.make(
 agent = SACAgent(
     env=env,
     max_buffer_size=200000,
-    # gamma 0.99 -> 0.95. Runs 342/343 proved the POLICY learns directed navigation
-    # (repeated 24-34 step reaches) but the CRITIC diverges out from under it (mean_q
-    # ->200, critic_loss ->1e6) — classic deadly-triad overestimation, which the alpha
-    # machinery cannot fix (alpha hit even the raised 1.0 ceiling and it still diverged).
-    # Lower gamma is the principled lever: it makes the Bellman operator more contractive
-    # and shrinks the bootstrap horizon Sum(gamma^t) over 250 steps from ~92 to ~20, so
-    # overestimation can't compound as far. 0.95^30 = 0.21 still propagates reward across
-    # the ~30 steps a 120px reach takes.
-    gamma=0.95,
+    # gamma back to 0.99: run 344 showed 0.95 over-contracts — the reward barely
+    # propagates (0.95^130~0.001) so the critic learns Q~0 everywhere and reaches
+    # collapsed to ~1%. Gamma couples stability and credit-range, so it's the wrong
+    # knob for the critic divergence. Critic stability is now handled by LayerNorm in
+    # the critic heads (sac_model.py), which bounds overestimation without shrinking
+    # the discount — so gamma stays high for long-range credit assignment.
+    gamma=0.99,
     tau=0.005,
     alpha=0.1,                  # initial temperature; auto-tuned from here
     lr=3e-4,

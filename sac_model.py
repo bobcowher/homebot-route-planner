@@ -88,24 +88,34 @@ class DiscreteQNet(_CNNBase):
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
+        # LayerNorm after each critic hidden layer (before ReLU). This is the standard
+        # cure for value overestimation: it constrains the pre-activation distribution
+        # so the critic can't extrapolate to extreme Q on out-of-distribution inputs,
+        # bounding the deadly-triad divergence (runs 342/343: mean_q->200, loss->1e6)
+        # WITHOUT shrinking the discount/reward signal the way lowering gamma did
+        # (run 344 killed learning). Applied only to the critic, not the policy.
         self.q1_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
+        self.q1_ln1 = nn.LayerNorm(HEAD_HIDDEN)
         self.q1_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q1_ln2 = nn.LayerNorm(HEAD_HIDDEN)
         self.q1_out = nn.Linear(HEAD_HIDDEN, n_actions)
 
         self.q2_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
+        self.q2_ln1 = nn.LayerNorm(HEAD_HIDDEN)
         self.q2_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q2_ln2 = nn.LayerNorm(HEAD_HIDDEN)
         self.q2_out = nn.Linear(HEAD_HIDDEN, n_actions)
 
         self.apply(self._weights_init)
 
     def forward(self, image, goal, motion):
         feat = self._extract(image, goal, motion)
-        q1 = F.relu(self.q1_fc1(feat))
-        q1 = F.relu(self.q1_fc2(q1))
+        q1 = F.relu(self.q1_ln1(self.q1_fc1(feat)))
+        q1 = F.relu(self.q1_ln2(self.q1_fc2(q1)))
         q1 = self.q1_out(q1)   # (B, n_actions)
 
-        q2 = F.relu(self.q2_fc1(feat))
-        q2 = F.relu(self.q2_fc2(q2))
+        q2 = F.relu(self.q2_ln1(self.q2_fc1(feat)))
+        q2 = F.relu(self.q2_ln2(self.q2_fc2(q2)))
         q2 = self.q2_out(q2)   # (B, n_actions)
         return q1, q2
 
