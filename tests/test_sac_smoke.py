@@ -52,3 +52,31 @@ def test_smoke_reach_curriculum_runs_and_floods_reward():
     assert agent.total_env_steps > 0
     assert math.isfinite(agent.critic.conv1.weight.sum().item())
     env.close()
+
+
+def test_smoke_start_distance_curriculum_spawns_near_goal():
+    """Start-distance curriculum: with a small start_dist the robot must be respawned
+    within start_dist of the goal. Verify the override actually moves the spawn inside
+    the band (and the rollout still runs end-to-end without NaNs)."""
+    env = _make_env()
+    agent = SACAgent(env=env, max_buffer_size=5000)
+
+    # Exercise the spawn override directly across several resets: the respawn should
+    # land within the band the large majority of the time (fallback only when a goal is
+    # cornered with no in-band tile), and far closer than a full-map random spawn.
+    import numpy as np
+    base = env.unwrapped
+    agent._start_dist_min = 90.0
+    dists = []
+    for _ in range(10):
+        env.reset()
+        raw2 = agent._spawn_near_goal(base, start_dist=200.0)
+        dists.append(float(np.linalg.norm(raw2["achieved_goal"] - raw2["desired_goal"])))
+    in_band = [d for d in dists if d <= 200.0 + base._map.tile_size]
+    assert len(in_band) >= 7  # the spawn override is actually pulling starts near the goal
+
+    agent.train(episodes=3, batch_size=16, run_tag="smoke-startdist", warmup_steps=0,
+                start_dist_start=150.0, start_dist_end=400.0,
+                start_dist_anneal_start=0, start_dist_anneal_end=3, start_dist_min=90.0)
+    assert math.isfinite(agent.policy.conv1.weight.sum().item())
+    env.close()

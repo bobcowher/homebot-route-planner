@@ -211,16 +211,42 @@ class SACAgent:
     # Training loop
     # ------------------------------------------------------------------
 
-    def _run_episode(self, collect_only=False, batch_size=64, reach_radius=None):
+    def _spawn_near_goal(self, base, start_dist):
+        """Start-distance curriculum: reposition the robot onto a valid floor tile in
+        [start_dist_min, start_dist] px of the goal, then rebuild the obs. The discrete
+        policy moves 4px/step, so a random walk only diffuses ~4*sqrt(T) ~ 126px over a
+        1000-step episode — far spawns are physically unreachable by exploration and
+        yield no learning signal. Spawning near the goal makes navigation short enough
+        to actually reach (real reward + HER on directed trajectories); start_dist then
+        expands toward the full map. start_dist_min sits just outside the 79px reach
+        radius so the episode still requires real navigation, not a step-0 win."""
+        gx, gy = float(base._desired_goal[0]), float(base._desired_goal[1])
+        ts = base._map.tile_size
+        cands = []
+        for col, row in base._map.valid_floor_tiles():
+            px, py = base._map.tile_to_pixel(col, row)
+            d = math.hypot(px - gx, py - gy)
+            if self._start_dist_min <= d <= start_dist and not base._robot._collides(
+                    float(px), float(py), base._map.wall_solid, ts,
+                    base._map.fixture_pixel_rects):
+                cands.append((float(px), float(py)))
+        if cands:  # else: keep the env's own spawn (e.g. goal cornered, no tile in band)
+            px, py = cands[int(base.np_random.integers(0, len(cands)))]
+            base._robot.x, base._robot.y = px, py
+        return base._build_obs()
+
+    def _run_episode(self, collect_only=False, batch_size=64, reach_radius=None,
+                     start_dist=None):
         # reach_radius (success-radius curriculum): when set, the rollout reward and
         # terminal are recomputed at this radius from the robot pose, overriding the
-        # env's fixed 79px — a big early radius floods real goal-reward into the critic
-        # (random walks "reach" often), then shrinks toward the env spec. Episodes also
-        # terminate on reach, which stops the soft-value entropy bonus from accumulating
-        # over the full 1000-step horizon. reach_radius=None preserves env behavior.
+        # env's fixed 79px. reach_radius=None preserves env behavior.
+        # start_dist (start-distance curriculum): when set, the robot is respawned
+        # within start_dist of the goal (see _spawn_near_goal) — the exploration fix.
         use_curriculum = reach_radius is not None
         raw_obs, _ = self.env.reset()
         base = self.env.unwrapped
+        if start_dist is not None:
+            raw_obs = self._spawn_near_goal(base, start_dist)
         r = base._robot
         desired_goal = raw_obs["desired_goal"]
         ms  = MotionStateDiscrete()
@@ -290,20 +316,34 @@ class SACAgent:
 
     def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000,
               reach_start=None, reach_end=None,
-              reach_anneal_start=0, reach_anneal_end=None):
+              reach_anneal_start=0, reach_anneal_end=None,
+              start_dist_start=None, start_dist_end=None,
+              start_dist_anneal_start=0, start_dist_anneal_end=None,
+              start_dist_min=90.0):
         # Success-radius curriculum (optional): the per-episode reach/terminal radius
         # anneals reach_start -> reach_end over [anneal_start, anneal_end]. reach_start
         # None preserves the env's fixed-79px reward/termination exactly.
+        # Start-distance curriculum (optional): spawn distance anneals start_dist_start
+        # -> start_dist_end; the robot is respawned within that distance of the goal so
+        # early navigation is short enough to actually reach (the exploration fix).
         use_curriculum = reach_start is not None
         if use_curriculum and reach_anneal_end is None:
             reach_anneal_end = episodes
+        use_start_curriculum = start_dist_start is not None
+        if use_start_curriculum and start_dist_anneal_end is None:
+            start_dist_anneal_end = episodes
+        self._start_dist_min = start_dist_min
         run_tag = run_tag or self._run_tag()
         writer  = SummaryWriter(
             f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
 
+        # Warmup spawns near the goal too (at the initial distance) so the random
+        # buffer already contains real reaches, not just rewardless far-walks.
+        warmup_dist = start_dist_start if use_start_curriculum else None
         warmup_done = 0
         while warmup_done < warmup_steps:
-            _, ep_steps, *_ = self._run_episode(collect_only=True, batch_size=batch_size)
+            _, ep_steps, *_ = self._run_episode(collect_only=True, batch_size=batch_size,
+                                                start_dist=warmup_dist)
             warmup_done += ep_steps
         if warmup_steps > 0:
             print(f"[warmup] {warmup_done} random steps collected")
@@ -314,14 +354,21 @@ class SACAgent:
                                 reach_anneal_start, reach_anneal_end)
                 if use_curriculum else None
             )
+            start_dist = (
+                reach_radius_at(episode, start_dist_start, start_dist_end,
+                                start_dist_anneal_start, start_dist_anneal_end)
+                if use_start_curriculum else None
+            )
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
                 self._run_episode(collect_only=False, batch_size=batch_size,
-                                  reach_radius=reach_radius)
+                                  reach_radius=reach_radius, start_dist=start_dist)
 
             writer.add_scalar("Train/episode_reward",  ep_reward, episode)
             writer.add_scalar("Train/episode_steps",   ep_steps,  episode)
             if use_curriculum:
                 writer.add_scalar("Train/reach_radius", reach_radius, episode)
+            if use_start_curriculum:
+                writer.add_scalar("Train/start_dist", start_dist, episode)
             if n_updates > 0:
                 writer.add_scalar("loss/critic",           cl_sum  / n_updates, episode)
                 writer.add_scalar("loss/actor",            al_sum  / n_updates, episode)
@@ -330,8 +377,9 @@ class SACAgent:
                 writer.add_scalar("Train/alpha",           self.alpha, episode)
 
             radius_str = f" | radius: {reach_radius:.0f}" if use_curriculum else ""
+            sdist_str  = f" | start_dist: {start_dist:.0f}" if use_start_curriculum else ""
             print(f"Episode {episode} | reward: {ep_reward:.2f} | "
-                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}{radius_str}")
+                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}{radius_str}{sdist_str}")
 
             if episode % 50 == 0:
                 self.save_checkpoint()

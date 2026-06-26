@@ -36,12 +36,14 @@ agent = SACAgent(
 # so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
 # (the run-334 mean_q -> 104 divergence). 5k random steps.
 #
-# Success-radius curriculum: bounded-alpha SAC stays stable but doesn't *learn* —
-# random walks almost never hit the 79px goal, so the critic gets no real reward and
-# the policy never commits (run 337: reward stuck at 0, entropy ~1.9). Start with a
-# big 200px reach radius so real goal-reward floods the critic early, then anneal to
-# the env's 79px over the first 600 episodes (hold 79 after). Reaching also terminates
-# episodes, which further tames the soft-value entropy bonus.
+# Start-distance curriculum (the exploration fix): the discrete policy moves 4px/step,
+# so a random walk only diffuses ~126px over a 1000-step episode — far spawns are
+# physically unreachable and yield no learning signal (run 337/338: reward ~0, the
+# agent only "won" when randomly spawned inside the goal). Instead spawn the robot
+# CLOSE to the goal (120-150px) so navigation is short enough to actually reach — real
+# reward + HER on directed trajectories — then expand the spawn distance toward the
+# full map (~900px) over 700 episodes. Uses the env's normal 79px reach reward.
 agent.train(episodes=900, batch_size=64, warmup_steps=5000,
-            reach_start=200.0, reach_end=79.0,
-            reach_anneal_start=0, reach_anneal_end=600)
+            start_dist_start=150.0, start_dist_end=900.0,
+            start_dist_anneal_start=0, start_dist_anneal_end=700,
+            start_dist_min=90.0)
