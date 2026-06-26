@@ -72,3 +72,28 @@ class MotionStateContinuous:
         self.history.append((x, y))
         self.prev = (x, y)
         self.last_action = action
+
+
+class MotionStateDiscrete:
+    """[dx/step, dy/step, 0.0, 0.0] — 4 dims, matches buffer MOTION_DIM.
+
+    Tracks per-step displacement only; discrete action index is not encoded
+    here because DiscreteQNet evaluates all actions simultaneously.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.prev = None
+
+    def vec(self, x: float, y: float) -> np.ndarray:
+        if self.prev is None:
+            dx, dy = 0.0, 0.0
+        else:
+            dx = (x - self.prev[0]) / ROBOT_STEP_PX
+            dy = (y - self.prev[1]) / ROBOT_STEP_PX
+        return np.array([dx, dy, 0.0, 0.0], dtype=np.float32)
+
+    def commit(self, x: float, y: float, action: int):  # noqa: ARG002
+        self.prev = (x, y)

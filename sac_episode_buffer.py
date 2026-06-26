@@ -1,12 +1,8 @@
-"""HER relabeling for CNN-based SAC, adapted from episode_buffer.py.
+"""HER relabeling for discrete SAC, adapted from episode_buffer.py.
 
 Stores raw image tensors per transition (same as the DQN EpisodeBuffer).
-HER swaps the goal vector (noisy_world_vector) without re-running the CNN --
-images are passed through unchanged.
-
-Goal representation: noisy_world_vector [dx, dy] in world frame (same as
-the DQN champion), computed fresh at relabeling time so each hindsight copy
-gets independent noise (realistic: each localisation is a fresh noisy estimate).
+Actions are discrete int indices.
+HER swaps the goal vector (noisy_world_vector) — images and actions unchanged.
 """
 from dataclasses import dataclass
 import random
@@ -21,7 +17,7 @@ from goal_geometry import noisy_world_vector
 class SACTransition:
     obs:           torch.Tensor   # (3, 96, 96) uint8
     next_obs:      torch.Tensor   # (3, 96, 96) uint8
-    action:        np.ndarray
+    action:        int            # discrete action index
     reward:        float
     done:          bool
     achieved_prev: np.ndarray     # robot (x, y) at obs
@@ -43,7 +39,7 @@ class SACEpisodeBuffer:
         self._transitions.append(SACTransition(
             obs=obs,
             next_obs=next_obs,
-            action=np.asarray(action, dtype=np.float32),
+            action=int(action),
             reward=float(reward),
             done=bool(done),
             achieved_prev=np.asarray(achieved_prev, dtype=np.float32),

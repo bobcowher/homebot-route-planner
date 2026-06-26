@@ -1,7 +1,7 @@
 # tests/test_sac_smoke.py
 """End-to-end smoke test: real env, a handful of episodes, must not crash
-or produce NaNs. This is NOT a convergence test -- it's the pipeline-runs
-check from the design spec."""
+or produce NaNs. NOT a convergence test — just verifies the discrete SAC
+pipeline runs end-to-end."""
 import math
 
 import gymnasium as gym
@@ -14,10 +14,10 @@ def _make_env():
     return gym.make(
         "HomeBot2D-Goal-V1",
         render_mode=None,
-        action_mode="continuous",
+        action_mode="discrete",
         obs_resolution=(96, 96),
         n_trash=1,
-        max_steps=50,  # short episodes -- test just needs the pipe to run
+        max_steps=50,
         map_name="default",
         goals=["collect_trash"],
         random_start=True,
@@ -26,7 +26,7 @@ def _make_env():
 
 def test_smoke_few_episodes_no_nan_no_crash():
     env = _make_env()
-    agent = SACAgent(env=env, action_dim=2, max_buffer_size=5000)
+    agent = SACAgent(env=env, max_buffer_size=5000)
 
     agent.train(episodes=5, batch_size=16, run_tag="smoke-test", warmup_steps=0)
 

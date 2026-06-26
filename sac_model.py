@@ -1,32 +1,32 @@
-"""CNN-based double-Q SAC actor/critic for HomeBotGoalEnv.
+"""Discrete SAC actor/critic for HomeBotGoalEnv (discrete action mode).
 
-Architecture mirrors the DQN champion (QModel): shared CNN structure across
-Policy and Critic (separate weights), goal encoder (2-layer, 128 hidden),
-motion encoder (linear, 32), combined head feeding the actor/critic outputs.
+Architecture: separate CNN actor + CNN double-Q critic, no weight sharing.
+Both inherit _CNNBase (same conv stack as DQN champion QModel).
 
-Inputs per forward call:
-  image : (B, 3, 96, 96) float32 in [0, 1]  — normalized from uint8
-  goal  : (B, 2)          float32             — noisy_world_vector [dx, dy]
-  motion: (B, 4)          float32             — [last_linear, last_angular, dx, dy]
+Key difference from continuous SAC:
+  - DiscreteQNet:  takes (image, goal, motion) → (q1, q2) each (B, n_actions)
+                   NO action input; outputs Q for every action simultaneously
+  - DiscretePolicy: takes (image, goal, motion) → (probs, log_probs) each (B, n_actions)
+                    categorical distribution, no reparameterisation needed
 
-For Critic, action (B, action_dim) is additionally concatenated into the head.
+Discrete SAC update rule (Christodoulou 2019):
+  V(s') = Σ_a π(a|s') [Q_target(s', a) - α log π(a|s')]   (exact expectation)
+  L_critic = MSE(Q(s, a_taken), r + γ V(s'))               (per taken action)
+  L_actor  = Σ_a π(a|s)  [α log π(a|s) - min_Q(s, a)]     (full expectation)
 """
 import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
 
-LOG_SIG_MAX = 2
-LOG_SIG_MIN = -4
-epsilon = 1e-6
+LOG_SIG_MIN = -4   # kept for reference, not used in discrete policy
 
-GOAL_SCALE = (864.0, 576.0)   # default map dims; normalises dx,dy to ~[-1,1]
+GOAL_SCALE  = (864.0, 576.0)
 GOAL_HIDDEN = 128
 MOTION_HIDDEN = 32
-HEAD_HIDDEN = 256              # per-layer width in the combined head
-CNN_FLAT = 4096                # 64 * 8 * 8  (verified below via dummy forward)
+HEAD_HIDDEN = 256
+CNN_FLAT    = 4096   # 64 * 8 * 8  (verified via dummy forward)
 
 
 def _conv_forward(x, conv1, conv2, conv3):
@@ -37,11 +37,11 @@ def _conv_forward(x, conv1, conv2, conv3):
 
 
 class _CNNBase(nn.Module):
-    """Shared CNN + goal-encoder + motion-encoder scaffolding."""
+    """Shared CNN + goal-encoder + motion-encoder scaffolding (separate weights per subclass)."""
 
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(3,  32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
@@ -53,7 +53,6 @@ class _CNNBase(nn.Module):
             torch.tensor(GOAL_SCALE, dtype=torch.float32), requires_grad=False)
         self.goal_enc1 = nn.Linear(2, GOAL_HIDDEN)
         self.goal_enc2 = nn.Linear(GOAL_HIDDEN, GOAL_HIDDEN)
-
         self.motion_enc = nn.Linear(4, MOTION_HIDDEN)
 
     @property
@@ -68,25 +67,6 @@ class _CNNBase(nn.Module):
         m = F.relu(self.motion_enc(motion))
         return torch.cat([img_flat, g, m], dim=1)
 
-
-class Critic(_CNNBase):
-    def __init__(self, action_dim, checkpoint_dir='checkpoints', name='sac_critic'):
-        super().__init__()
-        self.checkpoint_dir = checkpoint_dir
-        self.name = name
-        self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
-
-        head_in = self.feature_dim + action_dim
-        self.q1_fc1 = nn.Linear(head_in, HEAD_HIDDEN)
-        self.q1_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.q1_out = nn.Linear(HEAD_HIDDEN, 1)
-
-        self.q2_fc1 = nn.Linear(head_in, HEAD_HIDDEN)
-        self.q2_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.q2_out = nn.Linear(HEAD_HIDDEN, 1)
-
-        self.apply(self._weights_init)
-
     @staticmethod
     def _weights_init(m):
         if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -94,16 +74,39 @@ class Critic(_CNNBase):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, image, goal, motion, action):
-        feat = self._extract(image, goal, motion)
-        x = torch.cat([feat, action], dim=1)
-        q1 = F.relu(self.q1_fc1(x))
-        q1 = F.relu(self.q1_fc2(q1))
-        q1 = self.q1_out(q1)
 
-        q2 = F.relu(self.q2_fc1(x))
+class DiscreteQNet(_CNNBase):
+    """Double-Q critic: outputs Q-values for ALL discrete actions.
+
+    forward() takes NO action input — returns vectors (B, n_actions) for both heads.
+    Critic loss indexes into the vector with the taken action via .gather().
+    """
+
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_critic'):
+        super().__init__()
+        self.checkpoint_dir = checkpoint_dir
+        self.name = name
+        self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
+
+        self.q1_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
+        self.q1_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q1_out = nn.Linear(HEAD_HIDDEN, n_actions)
+
+        self.q2_fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
+        self.q2_fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
+        self.q2_out = nn.Linear(HEAD_HIDDEN, n_actions)
+
+        self.apply(self._weights_init)
+
+    def forward(self, image, goal, motion):
+        feat = self._extract(image, goal, motion)
+        q1 = F.relu(self.q1_fc1(feat))
+        q1 = F.relu(self.q1_fc2(q1))
+        q1 = self.q1_out(q1)   # (B, n_actions)
+
+        q2 = F.relu(self.q2_fc1(feat))
         q2 = F.relu(self.q2_fc2(q2))
-        q2 = self.q2_out(q2)
+        q2 = self.q2_out(q2)   # (B, n_actions)
         return q1, q2
 
     def save_checkpoint(self):
@@ -113,8 +116,15 @@ class Critic(_CNNBase):
         self.load_state_dict(torch.load(self.checkpoint_file, weights_only=True))
 
 
-class Policy(_CNNBase):
-    def __init__(self, action_dim, action_space=None, checkpoint_dir='checkpoints', name='sac_policy'):
+class DiscretePolicy(_CNNBase):
+    """Categorical actor: outputs action probabilities over n_actions.
+
+    forward() returns (probs, log_probs) each (B, n_actions).
+    log_probs from log_softmax is numerically stable (avoids log(0)).
+    get_action() samples or argmaxes for exploration / evaluation.
+    """
+
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_policy'):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.name = name
@@ -122,47 +132,27 @@ class Policy(_CNNBase):
 
         self.fc1 = nn.Linear(self.feature_dim, HEAD_HIDDEN)
         self.fc2 = nn.Linear(HEAD_HIDDEN, HEAD_HIDDEN)
-        self.mean_fc = nn.Linear(HEAD_HIDDEN, action_dim)
-        self.log_std_fc = nn.Linear(HEAD_HIDDEN, action_dim)
-
-        if action_space is not None:
-            high = torch.FloatTensor(action_space.high)
-            low  = torch.FloatTensor(action_space.low)
-            self.action_scale = nn.Parameter((high - low) / 2.0, requires_grad=False)
-            self.action_bias  = nn.Parameter((high + low) / 2.0, requires_grad=False)
-        else:
-            self.action_scale = nn.Parameter(torch.ones(action_dim), requires_grad=False)
-            self.action_bias  = nn.Parameter(torch.zeros(action_dim), requires_grad=False)
+        self.out = nn.Linear(HEAD_HIDDEN, n_actions)
 
         self.apply(self._weights_init)
-
-    @staticmethod
-    def _weights_init(m):
-        if isinstance(m, (nn.Linear, nn.Conv2d)):
-            nn.init.xavier_uniform_(m.weight, gain=1)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, image, goal, motion):
         feat = self._extract(image, goal, motion)
         x = F.relu(self.fc1(feat))
         x = F.relu(self.fc2(x))
-        mean = self.mean_fc(x)
-        log_std = self.log_std_fc(x).clamp(LOG_SIG_MIN, LOG_SIG_MAX)
-        return mean, log_std
+        logits = self.out(x)
+        probs     = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        return probs, log_probs
 
-    def sample(self, image, goal, motion):
-        mean, log_std = self.forward(image, goal, motion)
-        std = log_std.exp()
-        normal = Normal(mean, std)
-        x_t = normal.rsample()
-        y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
-        log_prob = log_prob.sum(1, keepdim=True)
-        mean_action = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean_action
+    def get_action(self, image, goal, motion, evaluate=False):
+        """Returns (action LongTensor (B,), log_probs (B, n_actions))."""
+        probs, log_probs = self.forward(image, goal, motion)
+        if evaluate:
+            action = probs.argmax(dim=-1)
+        else:
+            action = torch.multinomial(probs, 1).squeeze(-1)
+        return action, log_probs
 
     def save_checkpoint(self):
         torch.save(self.state_dict(), self.checkpoint_file)

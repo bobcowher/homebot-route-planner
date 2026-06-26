@@ -1,43 +1,46 @@
-import numpy as np
 import torch
-import gymnasium as gym
-from sac_model import Policy, Critic
+from sac_model import DiscreteQNet, DiscretePolicy
+
+N_ACTIONS = 8
+BATCH     = 4
 
 
-def _action_space():
-    return gym.spaces.Box(low=np.array([-1., -1.], dtype=np.float32),
-                          high=np.array([1., 1.], dtype=np.float32), dtype=np.float32)
-
-
-def _inputs(batch=8):
+def _inputs(batch=BATCH):
     image  = torch.rand(batch, 3, 96, 96)
     goal   = torch.rand(batch, 2)
     motion = torch.rand(batch, 4)
-    action = torch.rand(batch, 2)
-    return image, goal, motion, action
+    return image, goal, motion
 
 
-def test_critic_forward_shapes():
-    critic = Critic(action_dim=2)
-    image, goal, motion, action = _inputs()
-    q1, q2 = critic(image, goal, motion, action)
-    assert q1.shape == (8, 1)
-    assert q2.shape == (8, 1)
+def test_qnet_forward_shapes():
+    qnet = DiscreteQNet(n_actions=N_ACTIONS)
+    image, goal, motion = _inputs()
+    q1, q2 = qnet(image, goal, motion)
+    assert q1.shape == (BATCH, N_ACTIONS)
+    assert q2.shape == (BATCH, N_ACTIONS)
 
 
-def test_policy_sample_shapes_and_action_bounds():
-    policy = Policy(action_dim=2, action_space=_action_space())
-    image, goal, motion, _ = _inputs()
-    action, log_prob, mean = policy.sample(image, goal, motion)
-    assert action.shape == (8, 2)
-    assert log_prob.shape == (8, 1)
-    assert mean.shape == (8, 2)
-    assert torch.all(action >= -1.0) and torch.all(action <= 1.0)
+def test_policy_forward_shapes_and_valid_probs():
+    policy = DiscretePolicy(n_actions=N_ACTIONS)
+    image, goal, motion = _inputs()
+    probs, log_probs = policy(image, goal, motion)
+    assert probs.shape == (BATCH, N_ACTIONS)
+    assert log_probs.shape == (BATCH, N_ACTIONS)
+    assert torch.allclose(probs.sum(dim=-1), torch.ones(BATCH), atol=1e-5)
 
 
-def test_policy_sample_is_stochastic():
-    policy = Policy(action_dim=2, action_space=_action_space())
-    image, goal, motion, _ = _inputs(batch=1)
-    a1, _, _ = policy.sample(image, goal, motion)
-    a2, _, _ = policy.sample(image, goal, motion)
-    assert not torch.allclose(a1, a2)
+def test_policy_get_action_returns_valid_index():
+    policy = DiscretePolicy(n_actions=N_ACTIONS)
+    image, goal, motion = _inputs(batch=2)
+    action, log_probs = policy.get_action(image, goal, motion)
+    assert action.shape == (2,)
+    assert log_probs.shape == (2, N_ACTIONS)
+    assert torch.all(action >= 0) and torch.all(action < N_ACTIONS)
+
+
+def test_policy_evaluate_is_deterministic():
+    policy = DiscretePolicy(n_actions=N_ACTIONS)
+    image, goal, motion = _inputs(batch=1)
+    a1, _ = policy.get_action(image, goal, motion, evaluate=True)
+    a2, _ = policy.get_action(image, goal, motion, evaluate=True)
+    assert a1.item() == a2.item()
