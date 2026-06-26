@@ -41,6 +41,15 @@ agent = SACAgent(
     # can execute directed navigation; the 0.05 alpha floor still prevents collapse, and
     # bounded Q removes the run-334 wrong-collapse risk that high entropy guarded against.
     target_entropy_ratio=0.4,
+    # alpha_max raised 0.3 -> 1.0. The 0.3 ceiling was added in run 336 to cap the
+    # entropy-bonus runaway when max_steps=1000 (Sum gamma^t ~ 100). With max_steps=250
+    # that bonus is ~12x smaller, so a high alpha is safe — and run 342 showed the 0.3
+    # ceiling is actively harmful: once the policy LEARNED to reach (real Q-spread), the
+    # controller needed alpha > 0.3 to hold entropy at target, the ceiling blocked it,
+    # entropy collapsed to one-hot and the soft value diverged (critic_loss -> 2.7e6).
+    # A 1.0 ceiling lets the controller hold the 0.83-entropy operating point that was
+    # learning well (24-step reaches) without collapse.
+    alpha_max=1.0,
 )
 
 # Warmup: fill the buffer with random transitions before any gradient update,
