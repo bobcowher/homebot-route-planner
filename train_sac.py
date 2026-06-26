@@ -29,7 +29,15 @@ env = gym.make(
 agent = SACAgent(
     env=env,
     max_buffer_size=200000,
-    gamma=0.99,
+    # gamma 0.99 -> 0.95. Runs 342/343 proved the POLICY learns directed navigation
+    # (repeated 24-34 step reaches) but the CRITIC diverges out from under it (mean_q
+    # ->200, critic_loss ->1e6) — classic deadly-triad overestimation, which the alpha
+    # machinery cannot fix (alpha hit even the raised 1.0 ceiling and it still diverged).
+    # Lower gamma is the principled lever: it makes the Bellman operator more contractive
+    # and shrinks the bootstrap horizon Sum(gamma^t) over 250 steps from ~92 to ~20, so
+    # overestimation can't compound as far. 0.95^30 = 0.21 still propagates reward across
+    # the ~30 steps a 120px reach takes.
+    gamma=0.95,
     tau=0.005,
     alpha=0.1,                  # initial temperature; auto-tuned from here
     lr=3e-4,
