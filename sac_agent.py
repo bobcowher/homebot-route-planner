@@ -34,7 +34,8 @@ class SACAgent:
     def __init__(self, env, max_buffer_size=200000,
                  gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
                  goal_noise_std=30.0,
-                 autotune_alpha=True, target_entropy_ratio=0.7):
+                 autotune_alpha=True, target_entropy_ratio=0.7,
+                 alpha_lr=1e-4, alpha_min=0.05):
         self.env = env
         self.n_actions = env.action_space.n
         self.gamma = gamma
@@ -48,10 +49,22 @@ class SACAgent:
         # (entropy -> 0) before it ever finds the goal. We instead learn alpha to
         # hold the policy's entropy at a target: target = ratio * log(n_actions),
         # ratio < 1 so the converged policy can still sharpen toward the goal.
+        #
+        # alpha_min FLOOR: during the rewardless cold-start the critic is flat, so
+        # the policy stays ~uniform (entropy ~= max) no matter what alpha does —
+        # nothing to sharpen toward yet. The tuner reads entropy > target and
+        # drives alpha toward 0 (~1000 updates/episode), and once HER finally gives
+        # the critic signal the now-dead alpha lets the policy collapse unregularised
+        # (this is run-335's alpha 0.074 -> 0.003 in 11 episodes). Flooring alpha keeps
+        # an entropy floor through the cold-start; the tuner still raises it above the
+        # floor once real Q-spread appears. alpha_lr is also decoupled (gentler) so the
+        # temperature doesn't overshoot across the per-episode update burst.
         self.autotune_alpha = autotune_alpha
+        self.alpha_min = alpha_min
         self.target_entropy = target_entropy_ratio * math.log(self.n_actions)
         self.log_alpha = torch.tensor(
             math.log(alpha), dtype=torch.float32, device=self.device, requires_grad=True)
+        self.log_alpha_min = math.log(alpha_min)
 
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
@@ -64,7 +77,7 @@ class SACAgent:
         self.policy = DiscretePolicy(self.n_actions, name="sac_policy").to(self.device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
 
-        self.alpha_optim = Adam([self.log_alpha], lr=lr)
+        self.alpha_optim = Adam([self.log_alpha], lr=alpha_lr)
 
         self.memory = SACReplayBuffer(max_buffer_size, device=str(self.device))
         self.episode_buffer = SACEpisodeBuffer()
@@ -150,6 +163,8 @@ class SACAgent:
             self.alpha_optim.zero_grad()
             alpha_loss.backward()
             self.alpha_optim.step()
+            with torch.no_grad():
+                self.log_alpha.clamp_(min=self.log_alpha_min)
             self.alpha = self.log_alpha.exp().item()
 
         # ---- Polyak target update ------------------------------------
