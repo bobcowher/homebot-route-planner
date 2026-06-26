@@ -40,14 +40,17 @@ agent = SACAgent(
     lr=3e-4,
     goal_noise_std=30.0,
     autotune_alpha=True,
-    # 0.2*log(8) ≈ 0.42 nats. Run 346 (4x512 critic) learned fast directed reaches in
-    # BURSTS but oscillated instead of converging: target 0.4 (0.83 nats) sits ABOVE where
-    # the committed policy wants to be, so every time it committed (entropy dropped) the
-    # auto-alpha controller cranked alpha up to force entropy back, de-committing it right
-    # as it mastered the task (alpha cycled 0.05<->0.20). Lowering the target below the
-    # natural commitment point lets the burst-learning consolidate. Safe now that the
-    # 4x512 critic is stable (it recovered from a mean_q spike that diverged the 2x256).
-    target_entropy_ratio=0.2,
+    # target 0.4 (0.83 nats), reverted from a 0.2 experiment: run 347 (target 0.2) showed
+    # lowering the setpoint KILLS exploration — entropy stuck at 2.0, reaches ~1% (vs 346's
+    # 14%). 346's burst-then-oscillate was the BEST behaviour; the setpoint was fine. The
+    # oscillation is a DAMPING problem: when the policy commits (entropy < target) the
+    # controller raises alpha and de-commits it. Fix is a SLOWER controller (alpha_lr below),
+    # not a lower target — so commitment persists long enough to sustain >60% reach-rate.
+    target_entropy_ratio=0.4,
+    # alpha_lr 1e-4 -> 3e-5: slow the temperature controller so it stops yanking the policy
+    # out of commitment (run 346 alpha cycled 0.05<->0.20 over ~100 eps). A gentler controller
+    # lets a committed, reaching policy persist and compound instead of oscillating.
+    alpha_lr=3e-5,
     # alpha_max raised 0.3 -> 1.0. The 0.3 ceiling was added in run 336 to cap the
     # entropy-bonus runaway when max_steps=1000 (Sum gamma^t ~ 100). With max_steps=250
     # that bonus is ~12x smaller, so a high alpha is safe — and run 342 showed the 0.3
