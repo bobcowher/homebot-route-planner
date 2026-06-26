@@ -35,7 +35,12 @@ agent = SACAgent(
     lr=3e-4,
     goal_noise_std=30.0,
     autotune_alpha=True,
-    target_entropy_ratio=0.7,   # target entropy = 0.7 * log(8) ≈ 1.45 nats
+    # 0.4*log(8) ≈ 0.83 nats. Lowered from 0.7 (≈1.45): with Q now bounded (max_steps
+    # fix), run 341 sat at entropy 1.38 — ~4 effective actions, too stochastic to commit
+    # to a directed ~30-step path, so reach-rate stalled at ~5%. A more committed policy
+    # can execute directed navigation; the 0.05 alpha floor still prevents collapse, and
+    # bounded Q removes the run-334 wrong-collapse risk that high entropy guarded against.
+    target_entropy_ratio=0.4,
 )
 
 # Warmup: fill the buffer with random transitions before any gradient update,
