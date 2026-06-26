@@ -36,31 +36,14 @@ agent = SACAgent(
     # diverged the undersized 2x256 — so gamma stays high for long-range credit assignment.
     gamma=0.99,
     tau=0.005,
-    alpha=0.1,                  # initial temperature; auto-tuned from here
+    # alpha (temperature) is now DECAYED on a fixed schedule (epsilon-greedy analog),
+    # not auto-tuned. Run 351 showed the auto-tuner's max-entropy actor never exploits the
+    # HER-built critic (entropy pinned at max for 1100 eps, 0 reaches). We disable autotune
+    # and decay alpha 0.2 -> 0.01 (explore -> argmax-Q exploit) in agent.train() below.
+    alpha=0.2,                  # starting temperature for the decay
     lr=3e-4,
     goal_noise_std=30.0,
-    autotune_alpha=True,
-    # target 0.4 (0.83 nats), reverted from a 0.2 experiment: run 347 (target 0.2) showed
-    # lowering the setpoint KILLS exploration — entropy stuck at 2.0, reaches ~1% (vs 346's
-    # 14%). 346's burst-then-oscillate was the BEST behaviour; the setpoint was fine. The
-    # oscillation is a DAMPING problem: when the policy commits (entropy < target) the
-    # controller raises alpha and de-commits it. Fix is a SLOWER controller (alpha_lr below),
-    # not a lower target — so commitment persists long enough to sustain >60% reach-rate.
-    target_entropy_ratio=0.4,
-    # alpha_lr 1e-4 (restored): run 348 (3e-5) showed the slow controller is HARMFUL — it
-    # let the policy collapse to entropy 0 / a single fixed ~17-step path that only reaches
-    # the ~5% of configs that suit it. 346's faster controller and its alpha oscillation were
-    # PROTECTIVE: re-injecting exploration prevented that deterministic collapse (held 14%).
-    alpha_lr=1e-4,
-    # alpha_max raised 0.3 -> 1.0. The 0.3 ceiling was added in run 336 to cap the
-    # entropy-bonus runaway when max_steps=1000 (Sum gamma^t ~ 100). With max_steps=250
-    # that bonus is ~12x smaller, so a high alpha is safe — and run 342 showed the 0.3
-    # ceiling is actively harmful: once the policy LEARNED to reach (real Q-spread), the
-    # controller needed alpha > 0.3 to hold entropy at target, the ceiling blocked it,
-    # entropy collapsed to one-hot and the soft value diverged (critic_loss -> 2.7e6).
-    # A 1.0 ceiling lets the controller hold the 0.83-entropy operating point that was
-    # learning well (24-step reaches) without collapse.
-    alpha_max=1.0,
+    autotune_alpha=False,
 )
 
 # Warmup: fill the buffer with random transitions before any gradient update,
@@ -74,4 +57,10 @@ agent = SACAgent(
 # no start curriculum. The earlier diffusion argument for a curriculum was wrong for HER, and
 # every no-curriculum SAC run (334/337) was under-capacity (2x256). This is the clean test:
 # the champion recipe with the one proven SAC change (4x512 critic) + HER + env random_start.
-agent.train(episodes=1200, batch_size=64, warmup_steps=5000)
+# Alpha decay 0.2 -> 0.01 over the first 60% of episodes, then hold (epsilon-greedy analog):
+# high temperature early so the policy explores and feeds HER diverse trajectories, decaying
+# to near-argmax late so the actor exploits the HER critic and closes the bootstrap loop that
+# DQN gets for free (behaviour = argmax-Q). 0.01 keeps a little residual stochasticity (~ the
+# champion's epsilon=0.1 floor).
+agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
+            alpha_anneal_to=0.01, alpha_anneal_episodes=720)

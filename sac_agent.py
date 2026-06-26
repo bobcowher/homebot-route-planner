@@ -42,6 +42,7 @@ class SACAgent:
         self.gamma = gamma
         self.tau = tau
         self.alpha = alpha  # current temperature (float); updated each step when autotuning
+        self._alpha_init = alpha  # starting temperature for the alpha-decay schedule
         self.goal_noise_std = goal_noise_std
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -319,7 +320,19 @@ class SACAgent:
               reach_start=None, reach_end=None,
               reach_anneal_start=0, reach_anneal_end=None,
               start_dist_start=None, start_dist_max=900.0, start_dist_step=15.0,
-              start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0):
+              start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0,
+              alpha_anneal_to=None, alpha_anneal_episodes=None):
+        # Alpha (temperature) decay schedule — the epsilon-greedy analog. When
+        # alpha_anneal_to is set (and autotune is off), alpha decays geometrically from
+        # its init value to alpha_anneal_to over alpha_anneal_episodes, then holds. This
+        # is the explore->exploit transition: high alpha early (stochastic exploration to
+        # feed HER) -> alpha ~0 late (the actor becomes argmax-Q, exploiting the HER-built
+        # critic). Run 351 showed SAC's separate max-entropy actor never exploits the HER
+        # critic on its own (entropy pinned at max for 1100 eps, 0 reaches) — DQN gets this
+        # for free because behaviour IS argmax-Q. Decaying alpha to ~0 restores that.
+        anneal_alpha = alpha_anneal_to is not None
+        if anneal_alpha and alpha_anneal_episodes is None:
+            alpha_anneal_episodes = episodes
         # Success-radius curriculum (optional): the per-episode reach/terminal radius
         # anneals reach_start -> reach_end over [anneal_start, anneal_end]. reach_start
         # None preserves the env's fixed-79px reward/termination exactly.
@@ -353,6 +366,9 @@ class SACAgent:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
+            if anneal_alpha:
+                frac = min(1.0, episode / max(1, alpha_anneal_episodes))
+                self.alpha = self._alpha_init * (alpha_anneal_to / self._alpha_init) ** frac
             reach_radius = (
                 reach_radius_at(episode, reach_start, reach_end,
                                 reach_anneal_start, reach_anneal_end)
