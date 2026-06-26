@@ -47,10 +47,11 @@ agent = SACAgent(
     # controller raises alpha and de-commits it. Fix is a SLOWER controller (alpha_lr below),
     # not a lower target — so commitment persists long enough to sustain >60% reach-rate.
     target_entropy_ratio=0.4,
-    # alpha_lr 1e-4 -> 3e-5: slow the temperature controller so it stops yanking the policy
-    # out of commitment (run 346 alpha cycled 0.05<->0.20 over ~100 eps). A gentler controller
-    # lets a committed, reaching policy persist and compound instead of oscillating.
-    alpha_lr=3e-5,
+    # alpha_lr 1e-4 (restored): run 348 (3e-5) showed the slow controller is HARMFUL — it
+    # let the policy collapse to entropy 0 / a single fixed ~17-step path that only reaches
+    # the ~5% of configs that suit it. 346's faster controller and its alpha oscillation were
+    # PROTECTIVE: re-injecting exploration prevented that deterministic collapse (held 14%).
+    alpha_lr=1e-4,
     # alpha_max raised 0.3 -> 1.0. The 0.3 ceiling was added in run 336 to cap the
     # entropy-bonus runaway when max_steps=1000 (Sum gamma^t ~ 100). With max_steps=250
     # that bonus is ~12x smaller, so a high alpha is safe — and run 342 showed the 0.3
