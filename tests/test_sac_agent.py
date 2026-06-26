@@ -44,13 +44,15 @@ def test_select_action_evaluate_is_deterministic():
     assert a1 == a2
 
 
-def test_update_parameters_runs_without_nan_and_returns_three_floats():
+def test_update_parameters_runs_without_nan_and_returns_four_floats():
     agent = _make_agent()
     _fill_buffer(agent, 200)
-    critic_loss, actor_loss, mean_q = agent.update_parameters(batch_size=16)
+    critic_loss, actor_loss, mean_q, entropy = agent.update_parameters(batch_size=16)
     assert np.isfinite(critic_loss)
     assert np.isfinite(actor_loss)
     assert np.isfinite(mean_q)
+    assert np.isfinite(entropy)
+    assert entropy > 0.0  # must be positive (Shannon entropy)
 
 
 def test_update_parameters_changes_policy_weights():
@@ -87,7 +89,7 @@ def test_mean_q_stays_bounded_over_repeated_updates():
 
     mean_qs = []
     for _ in range(100):
-        _, _, mean_q = agent.update_parameters(batch_size=32)
+        _, _, mean_q, _ = agent.update_parameters(batch_size=32)
         mean_qs.append(mean_q)
 
     assert all(abs(q) < 50 for q in mean_qs[-10:])

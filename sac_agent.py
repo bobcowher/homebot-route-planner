@@ -130,8 +130,9 @@ class SACAgent:
             target_p.data.copy_(self.tau * p.data + (1 - self.tau) * target_p.data)
 
         self.total_grad_steps += 1
-        mean_q = min_q.mean().item()
-        return critic_loss.item(), actor_loss.item(), mean_q
+        mean_q   = min_q.mean().item()
+        entropy  = -(probs.detach() * log_probs.detach()).sum(dim=-1).mean().item()
+        return critic_loss.item(), actor_loss.item(), mean_q, entropy
 
     # ------------------------------------------------------------------
     # Run-tag detection
@@ -167,7 +168,7 @@ class SACAgent:
         done = False
         episode_reward = 0.0
         episode_steps  = 0
-        critic_loss_sum = actor_loss_sum = mean_q_sum = 0.0
+        critic_loss_sum = actor_loss_sum = mean_q_sum = entropy_sum = 0.0
         update_count = 0
 
         while not done:
@@ -200,10 +201,11 @@ class SACAgent:
             obs = next_obs
 
             if not collect_only and self.memory.can_sample(batch_size):
-                cl, al, mq = self.update_parameters(batch_size)
+                cl, al, mq, ent = self.update_parameters(batch_size)
                 critic_loss_sum += cl
                 actor_loss_sum  += al
                 mean_q_sum      += mq
+                entropy_sum     += ent
                 update_count    += 1
 
         self.episode_buffer.send_to(
@@ -212,7 +214,7 @@ class SACAgent:
             goal_noise_std=self.goal_noise_std,
         )
         self.episode_buffer.clear()
-        return episode_reward, episode_steps, critic_loss_sum, actor_loss_sum, mean_q_sum, update_count
+        return episode_reward, episode_steps, critic_loss_sum, actor_loss_sum, mean_q_sum, entropy_sum, update_count
 
     def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000):
         run_tag = run_tag or self._run_tag()
@@ -227,15 +229,16 @@ class SACAgent:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
-            ep_reward, ep_steps, cl_sum, al_sum, mq_sum, n_updates = \
+            ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
                 self._run_episode(collect_only=False, batch_size=batch_size)
 
-            writer.add_scalar("Train/episode_reward", ep_reward, episode)
-            writer.add_scalar("Train/episode_steps",  ep_steps,  episode)
+            writer.add_scalar("Train/episode_reward",  ep_reward, episode)
+            writer.add_scalar("Train/episode_steps",   ep_steps,  episode)
             if n_updates > 0:
-                writer.add_scalar("loss/critic",  cl_sum / n_updates, episode)
-                writer.add_scalar("loss/actor",   al_sum / n_updates, episode)
-                writer.add_scalar("Train/mean_q", mq_sum / n_updates, episode)
+                writer.add_scalar("loss/critic",           cl_sum  / n_updates, episode)
+                writer.add_scalar("loss/actor",            al_sum  / n_updates, episode)
+                writer.add_scalar("Train/mean_q",          mq_sum  / n_updates, episode)
+                writer.add_scalar("Train/policy_entropy",  ent_sum / n_updates, episode)
 
             print(f"Episode {episode} | reward: {ep_reward:.2f} | steps: {ep_steps}")
 

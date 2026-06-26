@@ -30,4 +30,4 @@ agent = SACAgent(
     goal_noise_std=30.0,
 )
 
-agent.train(episodes=900, batch_size=64, warmup_steps=5000)
+agent.train(episodes=900, batch_size=64, warmup_steps=0)
