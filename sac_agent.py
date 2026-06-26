@@ -16,6 +16,7 @@ import datetime
 import math
 import os
 import subprocess
+from collections import deque
 
 import numpy as np
 import torch
@@ -317,22 +318,25 @@ class SACAgent:
     def train(self, episodes=900, batch_size=64, run_tag=None, warmup_steps=5000,
               reach_start=None, reach_end=None,
               reach_anneal_start=0, reach_anneal_end=None,
-              start_dist_start=None, start_dist_end=None,
-              start_dist_anneal_start=0, start_dist_anneal_end=None,
-              start_dist_min=90.0):
+              start_dist_start=None, start_dist_max=900.0, start_dist_step=15.0,
+              start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0):
         # Success-radius curriculum (optional): the per-episode reach/terminal radius
         # anneals reach_start -> reach_end over [anneal_start, anneal_end]. reach_start
         # None preserves the env's fixed-79px reward/termination exactly.
-        # Start-distance curriculum (optional): spawn distance anneals start_dist_start
-        # -> start_dist_end; the robot is respawned within that distance of the goal so
-        # early navigation is short enough to actually reach (the exploration fix).
+        #
+        # Start-distance curriculum (ADAPTIVE): spawn distance starts at start_dist_start
+        # and only grows (+start_dist_step, capped at start_dist_max) once the agent
+        # clears start_dist_threshold reach-rate over the last start_dist_window episodes.
+        # A fixed time schedule outran learning (run 339: distance hit ~196px by ep43
+        # while the agent still reached only ~1/15) — success-gating guarantees the agent
+        # masters each distance before the task expands.
         use_curriculum = reach_start is not None
         if use_curriculum and reach_anneal_end is None:
             reach_anneal_end = episodes
         use_start_curriculum = start_dist_start is not None
-        if use_start_curriculum and start_dist_anneal_end is None:
-            start_dist_anneal_end = episodes
         self._start_dist_min = start_dist_min
+        cur_start_dist = start_dist_start
+        recent_reaches = deque(maxlen=start_dist_window)
         run_tag = run_tag or self._run_tag()
         writer  = SummaryWriter(
             f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
@@ -354,14 +358,20 @@ class SACAgent:
                                 reach_anneal_start, reach_anneal_end)
                 if use_curriculum else None
             )
-            start_dist = (
-                reach_radius_at(episode, start_dist_start, start_dist_end,
-                                start_dist_anneal_start, start_dist_anneal_end)
-                if use_start_curriculum else None
-            )
+            start_dist = cur_start_dist if use_start_curriculum else None
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
                 self._run_episode(collect_only=False, batch_size=batch_size,
                                   reach_radius=reach_radius, start_dist=start_dist)
+
+            # Adaptive curriculum: expand spawn distance once the agent is reliably
+            # reaching at the current distance.
+            if use_start_curriculum:
+                recent_reaches.append(1.0 if ep_reward > 0.5 else 0.0)
+                if (len(recent_reaches) == recent_reaches.maxlen
+                        and sum(recent_reaches) / len(recent_reaches) >= start_dist_threshold
+                        and cur_start_dist < start_dist_max):
+                    cur_start_dist = min(cur_start_dist + start_dist_step, start_dist_max)
+                    recent_reaches.clear()  # re-measure reach-rate at the new distance
 
             writer.add_scalar("Train/episode_reward",  ep_reward, episode)
             writer.add_scalar("Train/episode_steps",   ep_steps,  episode)

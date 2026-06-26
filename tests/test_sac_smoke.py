@@ -76,7 +76,7 @@ def test_smoke_start_distance_curriculum_spawns_near_goal():
     assert len(in_band) >= 7  # the spawn override is actually pulling starts near the goal
 
     agent.train(episodes=3, batch_size=16, run_tag="smoke-startdist", warmup_steps=0,
-                start_dist_start=150.0, start_dist_end=400.0,
-                start_dist_anneal_start=0, start_dist_anneal_end=3, start_dist_min=90.0)
+                start_dist_start=150.0, start_dist_max=400.0, start_dist_step=15.0,
+                start_dist_window=2, start_dist_threshold=0.0, start_dist_min=90.0)
     assert math.isfinite(agent.policy.conv1.weight.sum().item())
     env.close()

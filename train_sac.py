@@ -36,14 +36,13 @@ agent = SACAgent(
 # so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
 # (the run-334 mean_q -> 104 divergence). 5k random steps.
 #
-# Start-distance curriculum (the exploration fix): the discrete policy moves 4px/step,
-# so a random walk only diffuses ~126px over a 1000-step episode — far spawns are
-# physically unreachable and yield no learning signal (run 337/338: reward ~0, the
-# agent only "won" when randomly spawned inside the goal). Instead spawn the robot
-# CLOSE to the goal (120-150px) so navigation is short enough to actually reach — real
-# reward + HER on directed trajectories — then expand the spawn distance toward the
-# full map (~900px) over 700 episodes. Uses the env's normal 79px reach reward.
-agent.train(episodes=900, batch_size=64, warmup_steps=5000,
-            start_dist_start=150.0, start_dist_end=900.0,
-            start_dist_anneal_start=0, start_dist_anneal_end=700,
-            start_dist_min=90.0)
+# Start-distance curriculum (ADAPTIVE — the exploration fix): the discrete policy moves
+# 4px/step, so a random walk only diffuses ~126px over a 1000-step episode — far spawns
+# are physically unreachable and yield no learning signal (run 337/338: reward ~0, the
+# agent only "won" when randomly spawned inside the goal). Spawn the robot CLOSE to the
+# goal (120px) so navigation is short enough to actually reach, then expand the spawn
+# distance toward the full map only once the agent clears a 60% reach-rate at the current
+# distance (a fixed schedule outran learning in run 339). Uses the env's normal 79px reward.
+agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
+            start_dist_start=120.0, start_dist_max=900.0, start_dist_step=15.0,
+            start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0)
