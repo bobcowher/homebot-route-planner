@@ -25,9 +25,14 @@ agent = SACAgent(
     max_buffer_size=200000,
     gamma=0.99,
     tau=0.005,
-    alpha=0.1,
+    alpha=0.1,                  # initial temperature; auto-tuned from here
     lr=3e-4,
     goal_noise_std=30.0,
+    autotune_alpha=True,
+    target_entropy_ratio=0.7,   # target entropy = 0.7 * log(8) ≈ 1.45 nats
 )
 
-agent.train(episodes=900, batch_size=64, warmup_steps=0)
+# Warmup: fill the buffer with random transitions before any gradient update,
+# so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
+# (the run-334 mean_q -> 104 divergence). 5k random steps.
+agent.train(episodes=900, batch_size=64, warmup_steps=5000)

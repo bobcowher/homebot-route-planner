@@ -13,6 +13,7 @@ No reparameterisation needed — expectation computed exactly over discrete acti
 """
 import cv2
 import datetime
+import math
 import os
 import subprocess
 
@@ -32,14 +33,25 @@ from sac_motion import MotionStateDiscrete
 class SACAgent:
     def __init__(self, env, max_buffer_size=200000,
                  gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
-                 goal_noise_std=30.0):
+                 goal_noise_std=30.0,
+                 autotune_alpha=True, target_entropy_ratio=0.7):
         self.env = env
         self.n_actions = env.action_space.n
         self.gamma = gamma
         self.tau = tau
-        self.alpha = alpha
+        self.alpha = alpha  # current temperature (float); updated each step when autotuning
         self.goal_noise_std = goal_noise_std
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Automatic entropy tuning. Fixed alpha cannot hold a categorical policy
+        # open on sparse reward — it collapses to a deterministic non-solution
+        # (entropy -> 0) before it ever finds the goal. We instead learn alpha to
+        # hold the policy's entropy at a target: target = ratio * log(n_actions),
+        # ratio < 1 so the converged policy can still sharpen toward the goal.
+        self.autotune_alpha = autotune_alpha
+        self.target_entropy = target_entropy_ratio * math.log(self.n_actions)
+        self.log_alpha = torch.tensor(
+            math.log(alpha), dtype=torch.float32, device=self.device, requires_grad=True)
 
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
@@ -51,6 +63,8 @@ class SACAgent:
 
         self.policy = DiscretePolicy(self.n_actions, name="sac_policy").to(self.device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
+
+        self.alpha_optim = Adam([self.log_alpha], lr=lr)
 
         self.memory = SACReplayBuffer(max_buffer_size, device=str(self.device))
         self.episode_buffer = SACEpisodeBuffer()
@@ -124,6 +138,19 @@ class SACAgent:
         self.policy_optim.zero_grad()
         actor_loss.backward()
         self.policy_optim.step()
+
+        # ---- Temperature: pull policy entropy toward target ----------
+        # alpha loss = E_a~π[ -log_alpha * (log π(a|s) + H_target) ], detached
+        # from the policy so only log_alpha moves. When entropy < target the
+        # bracket is positive -> alpha rises (more exploration), and vice versa.
+        if self.autotune_alpha:
+            alpha_loss = (probs.detach() *
+                          (-self.log_alpha * (log_probs.detach() + self.target_entropy))
+                          ).sum(dim=1).mean()
+            self.alpha_optim.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optim.step()
+            self.alpha = self.log_alpha.exp().item()
 
         # ---- Polyak target update ------------------------------------
         for target_p, p in zip(self.critic_target.parameters(), self.critic.parameters()):
@@ -239,8 +266,10 @@ class SACAgent:
                 writer.add_scalar("loss/actor",            al_sum  / n_updates, episode)
                 writer.add_scalar("Train/mean_q",          mq_sum  / n_updates, episode)
                 writer.add_scalar("Train/policy_entropy",  ent_sum / n_updates, episode)
+                writer.add_scalar("Train/alpha",           self.alpha, episode)
 
-            print(f"Episode {episode} | reward: {ep_reward:.2f} | steps: {ep_steps}")
+            print(f"Episode {episode} | reward: {ep_reward:.2f} | "
+                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}")
 
             if episode % 50 == 0:
                 self.save_checkpoint()
