@@ -29,24 +29,25 @@ env = gym.make(
 agent = SACAgent(
     env=env,
     max_buffer_size=200000,
-    # gamma back to 0.99: run 344 showed 0.95 over-contracts — the reward barely
-    # propagates (0.95^130~0.001) so the critic learns Q~0 everywhere and reaches
-    # collapsed to ~1%. Gamma couples stability and credit-range, so it's the wrong
-    # knob for the critic divergence. Critic stability is now handled by LayerNorm in
-    # the critic heads (sac_model.py), which bounds overestimation without shrinking
-    # the discount — so gamma stays high for long-range credit assignment.
+    # gamma 0.99: run 344 showed 0.95 over-contracts — the reward barely propagates
+    # (0.95^130~0.001) so the critic learns Q~0 everywhere and reaches collapsed to ~1%.
+    # Critic stability is now handled by CAPACITY (4x512 critic head, sac_model.py) — run
+    # 346 showed the champion-sized critic recovers from commitment-induced Q-spikes that
+    # diverged the undersized 2x256 — so gamma stays high for long-range credit assignment.
     gamma=0.99,
     tau=0.005,
     alpha=0.1,                  # initial temperature; auto-tuned from here
     lr=3e-4,
     goal_noise_std=30.0,
     autotune_alpha=True,
-    # 0.4*log(8) ≈ 0.83 nats. Lowered from 0.7 (≈1.45): with Q now bounded (max_steps
-    # fix), run 341 sat at entropy 1.38 — ~4 effective actions, too stochastic to commit
-    # to a directed ~30-step path, so reach-rate stalled at ~5%. A more committed policy
-    # can execute directed navigation; the 0.05 alpha floor still prevents collapse, and
-    # bounded Q removes the run-334 wrong-collapse risk that high entropy guarded against.
-    target_entropy_ratio=0.4,
+    # 0.2*log(8) ≈ 0.42 nats. Run 346 (4x512 critic) learned fast directed reaches in
+    # BURSTS but oscillated instead of converging: target 0.4 (0.83 nats) sits ABOVE where
+    # the committed policy wants to be, so every time it committed (entropy dropped) the
+    # auto-alpha controller cranked alpha up to force entropy back, de-committing it right
+    # as it mastered the task (alpha cycled 0.05<->0.20). Lowering the target below the
+    # natural commitment point lets the burst-learning consolidate. Safe now that the
+    # 4x512 critic is stable (it recovered from a mean_q spike that diverged the 2x256).
+    target_entropy_ratio=0.2,
     # alpha_max raised 0.3 -> 1.0. The 0.3 ceiling was added in run 336 to cap the
     # entropy-bonus runaway when max_steps=1000 (Sum gamma^t ~ 100). With max_steps=250
     # that bonus is ~12x smaller, so a high alpha is safe — and run 342 showed the 0.3
