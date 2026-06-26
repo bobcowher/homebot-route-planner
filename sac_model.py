@@ -23,7 +23,12 @@ import torch.nn.functional as F
 LOG_SIG_MIN = -4   # kept for reference, not used in discrete policy
 
 GOAL_SCALE  = (864.0, 576.0)
-GOAL_HIDDEN = 128
+# Goal encoder widened 128 -> 256 and RE-INJECTED at every head layer (see _run_head):
+# the goal vector was ~3% of the 4256-d feature, so the policy under-used it and learned
+# a near-goal-independent fixed path (run 348 reached in exactly 17 steps every time,
+# only ~14% of configs). Widening + re-injection keeps the goal signal alive deep in the
+# head so the policy actually turns toward an arbitrary commanded goal.
+GOAL_HIDDEN = 256
 MOTION_HIDDEN = 32
 # Head depth/width matched to the DQN champion (QModel head_layers=4, fc_hidden=512).
 # The champion deliberately needed depth-4 to represent a value field that isn't flat
@@ -43,15 +48,26 @@ def _conv_forward(x, conv1, conv2, conv3):
     return x.flatten(1)
 
 
-def _mlp_head(in_dim, hidden, n_layers):
+def _mlp_head(in_dim, hidden, n_layers, reinject_dim=0):
     """A stack of n_layers Linear(->hidden); caller applies ReLU after each and its own
     output projection. Mirrors QModel's head ModuleList (the depth lever for the coord
-    value field)."""
+    value field). If reinject_dim>0, every layer AFTER the first takes an extra reinject_dim
+    inputs (the goal embedding concatenated back in) so the goal can't wash out with depth."""
     layers, d = nn.ModuleList(), in_dim
-    for _ in range(n_layers):
-        layers.append(nn.Linear(d, hidden))
+    for i in range(n_layers):
+        layers.append(nn.Linear(d + (reinject_dim if i > 0 else 0), hidden))
         d = hidden
     return layers
+
+
+def _run_head(layers, x, goal_emb=None):
+    """Run an _mlp_head: ReLU after each layer; if goal_emb given, concat it to the input
+    of every layer after the first (the re-injection skip connection)."""
+    for i, layer in enumerate(layers):
+        if i > 0 and goal_emb is not None:
+            x = torch.cat([x, goal_emb], dim=1)
+        x = F.relu(layer(x))
+    return x
 
 
 class _CNNBase(nn.Module):
@@ -78,12 +94,14 @@ class _CNNBase(nn.Module):
         return self._conv_flat + GOAL_HIDDEN + MOTION_HIDDEN
 
     def _extract(self, image, goal, motion):
+        """Returns (feature, goal_emb). feature is the concatenated [img, goal, motion]
+        as before; goal_emb is returned separately so the heads can re-inject it at depth."""
         img_flat = _conv_forward(image, self.conv1, self.conv2, self.conv3)
         g = goal / self.goal_scale
         g = F.relu(self.goal_enc1(g))
         g = self.goal_enc2(g)
         m = F.relu(self.motion_enc(motion))
-        return torch.cat([img_flat, g, m], dim=1)
+        return torch.cat([img_flat, g, m], dim=1), g
 
     @staticmethod
     def _weights_init(m):
@@ -107,25 +125,19 @@ class DiscreteQNet(_CNNBase):
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        # Double-Q: two independent head_layers-deep MLP heads over the shared feature.
-        self.q1 = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        # Double-Q: two independent head_layers-deep MLP heads over the shared feature,
+        # with the goal embedding re-injected at every layer after the first.
+        self.q1 = _mlp_head(self.feature_dim, head_hidden, head_layers, reinject_dim=GOAL_HIDDEN)
         self.q1_out = nn.Linear(head_hidden, n_actions)
-        self.q2 = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        self.q2 = _mlp_head(self.feature_dim, head_hidden, head_layers, reinject_dim=GOAL_HIDDEN)
         self.q2_out = nn.Linear(head_hidden, n_actions)
 
         self.apply(self._weights_init)
 
     def forward(self, image, goal, motion):
-        feat = self._extract(image, goal, motion)
-        q1 = feat
-        for layer in self.q1:
-            q1 = F.relu(layer(q1))
-        q1 = self.q1_out(q1)   # (B, n_actions)
-
-        q2 = feat
-        for layer in self.q2:
-            q2 = F.relu(layer(q2))
-        q2 = self.q2_out(q2)   # (B, n_actions)
+        feat, g = self._extract(image, goal, motion)
+        q1 = self.q1_out(_run_head(self.q1, feat, g))   # (B, n_actions)
+        q2 = self.q2_out(_run_head(self.q2, feat, g))   # (B, n_actions)
         return q1, q2
 
     def save_checkpoint(self):
@@ -150,18 +162,15 @@ class DiscretePolicy(_CNNBase):
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        # Same head depth/width as the critic (symmetric), matching the champion's 4x512.
-        self.fc = _mlp_head(self.feature_dim, head_hidden, head_layers)
+        # Same head depth/width as the critic (symmetric), 4x512 + goal re-injection.
+        self.fc = _mlp_head(self.feature_dim, head_hidden, head_layers, reinject_dim=GOAL_HIDDEN)
         self.out = nn.Linear(head_hidden, n_actions)
 
         self.apply(self._weights_init)
 
     def forward(self, image, goal, motion):
-        feat = self._extract(image, goal, motion)
-        x = feat
-        for layer in self.fc:
-            x = F.relu(layer(x))
-        logits = self.out(x)
+        feat, g = self._extract(image, goal, motion)
+        logits = self.out(_run_head(self.fc, feat, g))
         probs     = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
         return probs, log_probs
