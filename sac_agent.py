@@ -35,7 +35,7 @@ class SACAgent:
                  gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
                  goal_noise_std=30.0,
                  autotune_alpha=True, target_entropy_ratio=0.7,
-                 alpha_lr=1e-4, alpha_min=0.05):
+                 alpha_lr=1e-4, alpha_min=0.05, alpha_max=0.3):
         self.env = env
         self.n_actions = env.action_space.n
         self.gamma = gamma
@@ -59,12 +59,24 @@ class SACAgent:
         # an entropy floor through the cold-start; the tuner still raises it above the
         # floor once real Q-spread appears. alpha_lr is also decoupled (gentler) so the
         # temperature doesn't overshoot across the per-episode update burst.
+        #
+        # alpha_max CEILING: these episodes never terminate (the agent doesn't reach
+        # the goal -> 1000-step timeout -> mask=1 always), so the soft value adds an
+        # entropy bonus alpha*H at every bootstrap step that accumulates over the full
+        # horizon: mean_q ~= alpha*H/(1-gamma). Unbounded alpha makes Q (and the tuner)
+        # run away: Q inflates -> policy sharpens -> entropy < target -> tuner raises
+        # alpha -> bigger bonus -> Q inflates more (run-336: alpha 0.05 -> 1.24, mean_q
+        # -> 176, critic_loss -> 5090). Capping alpha bounds the bonus (~alpha_max*H/(1-g))
+        # so Q converges. The band [min, max] gives the tuner authority to fight collapse
+        # (max 0.3 >> the fixed 0.1 that collapsed run 334) without letting it diverge.
         self.autotune_alpha = autotune_alpha
         self.alpha_min = alpha_min
+        self.alpha_max = alpha_max
         self.target_entropy = target_entropy_ratio * math.log(self.n_actions)
         self.log_alpha = torch.tensor(
             math.log(alpha), dtype=torch.float32, device=self.device, requires_grad=True)
         self.log_alpha_min = math.log(alpha_min)
+        self.log_alpha_max = math.log(alpha_max)
 
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
@@ -164,7 +176,7 @@ class SACAgent:
             alpha_loss.backward()
             self.alpha_optim.step()
             with torch.no_grad():
-                self.log_alpha.clamp_(min=self.log_alpha_min)
+                self.log_alpha.clamp_(min=self.log_alpha_min, max=self.log_alpha_max)
             self.alpha = self.log_alpha.exp().item()
 
         # ---- Polyak target update ------------------------------------
