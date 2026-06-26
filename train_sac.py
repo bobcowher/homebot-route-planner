@@ -44,6 +44,12 @@ agent = SACAgent(
     lr=3e-4,
     goal_noise_std=30.0,
     autotune_alpha=False,
+    # Asymmetric heads (Robert's hypothesis): actor DEEP (4x512 — compositional policy,
+    # like the Q-champion's head_layers=4), critic FLAT & WIDE (2x1024 — value regression
+    # where depth amplifies bootstrap overestimation; wide-shallow is steadier and should
+    # give cleaner Q-spread for the actor to exploit, vs run 352's early entropy collapse).
+    actor_head_layers=4, actor_head_hidden=512,
+    critic_head_layers=2, critic_head_hidden=1024,
 )
 
 # Warmup: fill the buffer with random transitions before any gradient update,

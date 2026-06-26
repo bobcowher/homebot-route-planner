@@ -36,7 +36,9 @@ class SACAgent:
                  gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
                  goal_noise_std=30.0,
                  autotune_alpha=True, target_entropy_ratio=0.7,
-                 alpha_lr=1e-4, alpha_min=0.05, alpha_max=0.3):
+                 alpha_lr=1e-4, alpha_min=0.05, alpha_max=0.3,
+                 actor_head_layers=4, actor_head_hidden=512,
+                 critic_head_layers=4, critic_head_hidden=512):
         self.env = env
         self.n_actions = env.action_space.n
         self.gamma = gamma
@@ -83,12 +85,19 @@ class SACAgent:
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
 
-        self.critic = DiscreteQNet(self.n_actions, name="sac_critic").to(self.device)
-        self.critic_target = DiscreteQNet(self.n_actions, name="sac_critic_target").to(self.device)
+        # Asymmetric heads: actor deep (compositional policy, like the Q-champion's
+        # head_layers=4), critic optionally flat & wide (value regression — depth amplifies
+        # the bootstrap overestimation that diverged the critic; wide-shallow is steadier
+        # and gives cleaner Q-spread for the actor to exploit). Defaults = symmetric 4x512.
+        self.critic = DiscreteQNet(self.n_actions, name="sac_critic",
+                                   head_layers=critic_head_layers, head_hidden=critic_head_hidden).to(self.device)
+        self.critic_target = DiscreteQNet(self.n_actions, name="sac_critic_target",
+                                          head_layers=critic_head_layers, head_hidden=critic_head_hidden).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_optim = Adam(self.critic.parameters(), lr=lr)
 
-        self.policy = DiscretePolicy(self.n_actions, name="sac_policy").to(self.device)
+        self.policy = DiscretePolicy(self.n_actions, name="sac_policy",
+                                     head_layers=actor_head_layers, head_hidden=actor_head_hidden).to(self.device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
 
         self.alpha_optim = Adam([self.log_alpha], lr=alpha_lr)
