@@ -14,7 +14,13 @@ env = gym.make(
     action_mode="discrete",
     obs_resolution=(96, 96),
     n_trash=1,
-    max_steps=1000,
+    # 250 steps * 4px/step = 1000px ~ the map diagonal, so a DIRECTED agent can still
+    # cross the whole map, but a FAILING episode now bootstraps over 250 non-terminal
+    # steps instead of 1000. That shrinks the soft-value horizon Sum(gamma^t) from ~100
+    # to ~8, which is what re-inflated run-340's mean_q to ~60 (critic_loss 3021) and
+    # collapsed the policy to a wrong deterministic behavior. Short curriculum distances
+    # need far fewer than 250 steps anyway.
+    max_steps=250,
     map_name="default",
     goals=["collect_trash"],
     random_start=True,
