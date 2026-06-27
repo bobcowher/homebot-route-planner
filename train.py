@@ -38,5 +38,5 @@ agent = SACAgent(
     head_hidden=512,
 )
 
-agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
+agent.train(episodes=2000, batch_size=64, warmup_steps=5000,
             epsilon_start=1.0, epsilon_min=0.1, epsilon_decay=0.977)
