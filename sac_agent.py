@@ -15,6 +15,7 @@ import cv2
 import datetime
 import math
 import os
+import random
 import subprocess
 from collections import deque
 
@@ -247,7 +248,7 @@ class SACAgent:
         return base._build_obs()
 
     def _run_episode(self, collect_only=False, batch_size=64, reach_radius=None,
-                     start_dist=None):
+                     start_dist=None, epsilon=None):
         # reach_radius (success-radius curriculum): when set, the rollout reward and
         # terminal are recomputed at this radius from the robot pose, overriding the
         # env's fixed 79px. reach_radius=None preserves env behavior.
@@ -275,8 +276,16 @@ class SACAgent:
             goal_prev   = noisy_world_vector(r.x, r.y, desired_goal[0], desired_goal[1],
                                              self.goal_noise_std)
 
-            if collect_only:
+            # Epsilon-greedy ARGMAX behaviour (the DQN champion's exploration). When epsilon
+            # is set: random action w.p. epsilon, else argmax of the policy (evaluate=True).
+            # Argmax commits to the best action regardless of how small the Q/logit spread is
+            # — a low-temperature softmax does NOT (run 354: entropy stuck at max). This is what
+            # lets the actor exploit the HER critic and close the bootstrap loop DQN gets free.
+            # epsilon=None falls back to softmax sampling (the default SAC behaviour).
+            if collect_only or (epsilon is not None and random.random() < epsilon):
                 action = int(self.env.action_space.sample())
+            elif epsilon is not None:
+                action = self.select_action(obs, goal_prev, motion_prev, evaluate=True)
             else:
                 action = self.select_action(obs, goal_prev, motion_prev)
 
@@ -332,7 +341,13 @@ class SACAgent:
               start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0,
               alpha_anneal_to=None, alpha_anneal_episodes=None,
               target_entropy_ratio_start=None, target_entropy_ratio_end=None,
-              te_anneal_episodes=None):
+              te_anneal_episodes=None,
+              epsilon_start=None, epsilon_min=0.1, epsilon_decay=0.977):
+        # Epsilon-greedy ARGMAX behaviour (champion exploration): when epsilon_start is set,
+        # behaviour is random w.p. epsilon else argmax(policy), with epsilon decaying
+        # geometrically epsilon_start -> epsilon_min. Forces commitment regardless of Q-spread
+        # (a low-temp softmax won't — run 354). epsilon_start=None keeps softmax sampling.
+        use_epsilon = epsilon_start is not None
         # Entropy-TARGET anneal (autotune ON) — the controlled explore->exploit schedule.
         # The auto-tuner HOLDS entropy at self.target_entropy (run 351 proved it can hold
         # entropy anywhere). So annealing the target from ratio_start*log(n) (near-max,
@@ -394,6 +409,7 @@ class SACAgent:
                 frac = min(1.0, episode / max(1, te_anneal_episodes))
                 ratio = target_entropy_ratio_start + (target_entropy_ratio_end - target_entropy_ratio_start) * frac
                 self.target_entropy = ratio * math.log(self.n_actions)
+            epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** episode)) if use_epsilon else None
             reach_radius = (
                 reach_radius_at(episode, reach_start, reach_end,
                                 reach_anneal_start, reach_anneal_end)
@@ -402,7 +418,8 @@ class SACAgent:
             start_dist = cur_start_dist if use_start_curriculum else None
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
                 self._run_episode(collect_only=False, batch_size=batch_size,
-                                  reach_radius=reach_radius, start_dist=start_dist)
+                                  reach_radius=reach_radius, start_dist=start_dist,
+                                  epsilon=epsilon)
 
             # Adaptive curriculum: expand spawn distance once the agent is reliably
             # reaching at the current distance.
@@ -428,11 +445,14 @@ class SACAgent:
                 writer.add_scalar("Train/alpha",           self.alpha, episode)
                 if anneal_te:
                     writer.add_scalar("Train/target_entropy", self.target_entropy, episode)
+                if use_epsilon:
+                    writer.add_scalar("Train/epsilon", epsilon, episode)
 
             radius_str = f" | radius: {reach_radius:.0f}" if use_curriculum else ""
             sdist_str  = f" | start_dist: {start_dist:.0f}" if use_start_curriculum else ""
+            eps_str    = f" | eps: {epsilon:.3f}" if use_epsilon else ""
             print(f"Episode {episode} | reward: {ep_reward:.2f} | "
-                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}{radius_str}{sdist_str}")
+                  f"steps: {ep_steps} | alpha: {self.alpha:.3f}{radius_str}{sdist_str}{eps_str}")
 
             if episode % 50 == 0:
                 self.save_checkpoint()

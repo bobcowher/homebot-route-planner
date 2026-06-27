@@ -36,17 +36,15 @@ agent = SACAgent(
     # diverged the undersized 2x256 — so gamma stays high for long-range credit assignment.
     gamma=0.99,
     tau=0.005,
-    # Autotune ON, with the entropy TARGET annealed in agent.train() (controlled explore->
-    # exploit). The tuner HOLDS entropy at the target (run 351 proved it), so a high target
-    # early forces exploration and a low target late releases argmax-Q exploitation — fixing
-    # run 352's premature collapse (fixed alpha decay let the policy commit at ep38).
-    alpha=0.2,                  # initial temperature; tuner takes over
+    # FIXED alpha 0.1, autotune OFF. Auto-entropy-tuning never converged usefully here (every
+    # variant oscillated, collapsed, or went inert — runs 336/342/347/348/354) — matches
+    # Robert's experience that SAC auto-alpha reliably lands on static ~0.1 anyway. Exploration
+    # is moved to epsilon-greedy ARGMAX behaviour (below), so alpha is just a mild actor entropy
+    # regulariser, not the explore/exploit knob.
+    alpha=0.1,
     lr=3e-4,
     goal_noise_std=30.0,
-    autotune_alpha=True,
-    alpha_lr=1e-4,
-    alpha_min=0.005,            # low floor so alpha can reach near-argmax when target -> ~0
-    alpha_max=1.0,
+    autotune_alpha=False,
     # Symmetric deep 4x512 heads (run 353's flat-wide 2x1024 critic diverged 100x worse,
     # critic_loss -> 2e6, ~4% vs 352's ~10%: the value field needs depth, per the champion).
     actor_head_layers=4, actor_head_hidden=512,
@@ -64,10 +62,10 @@ agent = SACAgent(
 # no start curriculum. The earlier diffusion argument for a curriculum was wrong for HER, and
 # every no-curriculum SAC run (334/337) was under-capacity (2x256). This is the clean test:
 # the champion recipe with the one proven SAC change (4x512 critic) + HER + env random_start.
-# Entropy-target anneal 0.9*log(8) -> 0.02*log(8) over the first 70% of episodes, then hold.
-# The auto-tuner holds entropy at the target, so this is a CONTROLLED explore->exploit: near-
-# max entropy early (forces exploration, feeds HER diverse trajectories) -> ~0 late (releases
-# the actor into argmax-Q to exploit the HER critic). Fixes run 352's ep38 premature collapse.
+# Epsilon-greedy ARGMAX behaviour (the champion's exploration, faithfully): random action
+# w.p. epsilon, else argmax(policy). epsilon 1.0 -> 0.1, decay 0.977/episode (champion values;
+# hits 0.1 by ~ep100). Argmax COMMITS regardless of Q-spread size — a low-temp softmax does
+# not (runs 352/354 only committed when a lucky Q-spike happened to force it). This is the
+# mechanism that lets the actor exploit the HER critic and close DQN's virtuous loop.
 agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
-            target_entropy_ratio_start=0.9, target_entropy_ratio_end=0.02,
-            te_anneal_episodes=840)
+            epsilon_start=1.0, epsilon_min=0.1, epsilon_decay=0.977)
