@@ -330,7 +330,19 @@ class SACAgent:
               reach_anneal_start=0, reach_anneal_end=None,
               start_dist_start=None, start_dist_max=900.0, start_dist_step=15.0,
               start_dist_window=25, start_dist_threshold=0.6, start_dist_min=90.0,
-              alpha_anneal_to=None, alpha_anneal_episodes=None):
+              alpha_anneal_to=None, alpha_anneal_episodes=None,
+              target_entropy_ratio_start=None, target_entropy_ratio_end=None,
+              te_anneal_episodes=None):
+        # Entropy-TARGET anneal (autotune ON) — the controlled explore->exploit schedule.
+        # The auto-tuner HOLDS entropy at self.target_entropy (run 351 proved it can hold
+        # entropy anywhere). So annealing the target from ratio_start*log(n) (near-max,
+        # forces exploration to feed HER) down to ratio_end*log(n) (~0, releases the actor
+        # into argmax-Q exploitation) gives a genuine staged transition — fixing run 352's
+        # premature collapse (fixed alpha decay let the policy commit at ep38 with nothing
+        # holding entropy up). Requires a low alpha_min so alpha can reach near-argmax late.
+        anneal_te = target_entropy_ratio_start is not None
+        if anneal_te and te_anneal_episodes is None:
+            te_anneal_episodes = episodes
         # Alpha (temperature) decay schedule — the epsilon-greedy analog. When
         # alpha_anneal_to is set (and autotune is off), alpha decays geometrically from
         # its init value to alpha_anneal_to over alpha_anneal_episodes, then holds. This
@@ -378,6 +390,10 @@ class SACAgent:
             if anneal_alpha:
                 frac = min(1.0, episode / max(1, alpha_anneal_episodes))
                 self.alpha = self._alpha_init * (alpha_anneal_to / self._alpha_init) ** frac
+            if anneal_te:
+                frac = min(1.0, episode / max(1, te_anneal_episodes))
+                ratio = target_entropy_ratio_start + (target_entropy_ratio_end - target_entropy_ratio_start) * frac
+                self.target_entropy = ratio * math.log(self.n_actions)
             reach_radius = (
                 reach_radius_at(episode, reach_start, reach_end,
                                 reach_anneal_start, reach_anneal_end)
@@ -410,6 +426,8 @@ class SACAgent:
                 writer.add_scalar("Train/mean_q",          mq_sum  / n_updates, episode)
                 writer.add_scalar("Train/policy_entropy",  ent_sum / n_updates, episode)
                 writer.add_scalar("Train/alpha",           self.alpha, episode)
+                if anneal_te:
+                    writer.add_scalar("Train/target_entropy", self.target_entropy, episode)
 
             radius_str = f" | radius: {reach_radius:.0f}" if use_curriculum else ""
             sdist_str  = f" | start_dist: {start_dist:.0f}" if use_start_curriculum else ""

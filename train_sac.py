@@ -36,20 +36,21 @@ agent = SACAgent(
     # diverged the undersized 2x256 — so gamma stays high for long-range credit assignment.
     gamma=0.99,
     tau=0.005,
-    # alpha (temperature) is now DECAYED on a fixed schedule (epsilon-greedy analog),
-    # not auto-tuned. Run 351 showed the auto-tuner's max-entropy actor never exploits the
-    # HER-built critic (entropy pinned at max for 1100 eps, 0 reaches). We disable autotune
-    # and decay alpha 0.2 -> 0.01 (explore -> argmax-Q exploit) in agent.train() below.
-    alpha=0.2,                  # starting temperature for the decay
+    # Autotune ON, with the entropy TARGET annealed in agent.train() (controlled explore->
+    # exploit). The tuner HOLDS entropy at the target (run 351 proved it), so a high target
+    # early forces exploration and a low target late releases argmax-Q exploitation — fixing
+    # run 352's premature collapse (fixed alpha decay let the policy commit at ep38).
+    alpha=0.2,                  # initial temperature; tuner takes over
     lr=3e-4,
     goal_noise_std=30.0,
-    autotune_alpha=False,
-    # Asymmetric heads (Robert's hypothesis): actor DEEP (4x512 — compositional policy,
-    # like the Q-champion's head_layers=4), critic FLAT & WIDE (2x1024 — value regression
-    # where depth amplifies bootstrap overestimation; wide-shallow is steadier and should
-    # give cleaner Q-spread for the actor to exploit, vs run 352's early entropy collapse).
+    autotune_alpha=True,
+    alpha_lr=1e-4,
+    alpha_min=0.005,            # low floor so alpha can reach near-argmax when target -> ~0
+    alpha_max=1.0,
+    # Symmetric deep 4x512 heads (run 353's flat-wide 2x1024 critic diverged 100x worse,
+    # critic_loss -> 2e6, ~4% vs 352's ~10%: the value field needs depth, per the champion).
     actor_head_layers=4, actor_head_hidden=512,
-    critic_head_layers=2, critic_head_hidden=1024,
+    critic_head_layers=4, critic_head_hidden=512,
 )
 
 # Warmup: fill the buffer with random transitions before any gradient update,
@@ -63,10 +64,10 @@ agent = SACAgent(
 # no start curriculum. The earlier diffusion argument for a curriculum was wrong for HER, and
 # every no-curriculum SAC run (334/337) was under-capacity (2x256). This is the clean test:
 # the champion recipe with the one proven SAC change (4x512 critic) + HER + env random_start.
-# Alpha decay 0.2 -> 0.01 over the first 60% of episodes, then hold (epsilon-greedy analog):
-# high temperature early so the policy explores and feeds HER diverse trajectories, decaying
-# to near-argmax late so the actor exploits the HER critic and closes the bootstrap loop that
-# DQN gets for free (behaviour = argmax-Q). 0.01 keeps a little residual stochasticity (~ the
-# champion's epsilon=0.1 floor).
+# Entropy-target anneal 0.9*log(8) -> 0.02*log(8) over the first 70% of episodes, then hold.
+# The auto-tuner holds entropy at the target, so this is a CONTROLLED explore->exploit: near-
+# max entropy early (forces exploration, feeds HER diverse trajectories) -> ~0 late (releases
+# the actor into argmax-Q to exploit the HER critic). Fixes run 352's ep38 premature collapse.
 agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
-            alpha_anneal_to=0.01, alpha_anneal_episodes=720)
+            target_entropy_ratio_start=0.9, target_entropy_ratio_end=0.02,
+            te_anneal_episodes=840)
