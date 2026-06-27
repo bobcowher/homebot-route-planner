@@ -7,7 +7,7 @@ import math
 import gymnasium as gym
 import homebot  # noqa: F401  (registers HomeBot2D-Goal-V1)
 
-from sac_agent import SACAgent
+from agent import SACAgent
 
 
 def _make_env():

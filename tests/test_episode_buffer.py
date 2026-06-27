@@ -1,147 +1,97 @@
-# tests/test_episode_buffer.py
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import torch
 import numpy as np
-from episode_buffer import EpisodeBuffer
-from buffer import ReplayBuffer
+import torch
+from episode_buffer import SACEpisodeBuffer
 
 
-def _make_replay():
-    return ReplayBuffer(
-        max_size=10000,
-        input_shape=(3, 96, 96),
-        input_device='cpu',
-        output_device='cpu',
-    )
+class FakeReplayBuffer:
+    def __init__(self):
+        self.calls = []
+
+    def store_transition(self, image, goal, motion, action, reward,
+                         next_image, next_goal, next_motion, done):
+        self.calls.append((image, goal, motion, action, reward,
+                           next_image, next_goal, next_motion, done))
 
 
-def _dummy_compute_reward(ag, dg, info):
-    return np.zeros(len(ag), dtype=np.float32)
+def fake_compute_reward(achieved, desired, info):  # noqa: ARG001
+    diff = np.asarray(achieved, dtype=np.float32) - np.asarray(desired, dtype=np.float32)
+    dist = np.linalg.norm(diff, axis=-1)
+    return (dist <= 31.0).astype(np.float32)
 
 
-def _pos(x, y):
-    return np.array([float(x), float(y)], dtype=np.float32)
+def _obs():
+    return torch.zeros(3, 96, 96, dtype=torch.uint8)
 
 
-def _store_walk(ep, obs, n):
-    """n-step straight-line walk: step i moves (i*10, i*10) -> ((i+1)*10, (i+1)*10)."""
-    for i in range(n):
-        ep.store(obs, 0, 0.0, obs, False,
-                 achieved_prev=_pos(i * 10, i * 10),
-                 achieved_next=_pos((i + 1) * 10, (i + 1) * 10))
+def _motion():
+    return np.zeros(4, dtype=np.float32)
 
 
-def test_send_to_transition_count():
-    """10-step episode, future strategy.
-
-    Original: 10 transitions.
-    Hindsight per step i: min(K, steps remaining after i) — last step has no
-    future, skipped. Expected count is derived from EpisodeBuffer.K so the
-    test tracks K tuning.
-    """
-    n = 10
-    expected = n + sum(min(EpisodeBuffer.K, n - 1 - i) for i in range(n))
-
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-
-    _store_walk(ep, obs, n)
-    ep.send_to(rep, _pos(300, 400), _dummy_compute_reward)
-    assert rep.mem_ctr == expected, f"expected {expected}, got {rep.mem_ctr}"
+def test_empty_buffer_sends_nothing():
+    eb = SACEpisodeBuffer()
+    rb = FakeReplayBuffer()
+    eb.send_to(rb, desired_goal=np.array([0.0, 0.0]),
+               compute_reward=fake_compute_reward, goal_noise_std=0.0)
+    assert rb.calls == []
 
 
-def test_send_to_clears_nothing_on_its_own():
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-
-    _store_walk(ep, obs, 1)
-    ep.send_to(rep, _pos(100, 100), _dummy_compute_reward)
-    assert len(ep) == 1, "send_to must not clear the buffer — caller does that"
-
-
-def test_relative_goal_vectors():
-    """Stored goals must be relative: desired - achieved_prev for Q(s, g) and
-    desired - achieved_next for the bootstrap target Q(s', g)."""
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-    desired = _pos(300, 400)
-
-    n = 3
-    _store_walk(ep, obs, n)
-    ep.send_to(rep, desired, _dummy_compute_reward)
-
-    # Pass 1 originals are the first n stored transitions.
-    for i in range(n):
-        expected_goal      = desired - _pos(i * 10, i * 10)
-        expected_next_goal = desired - _pos((i + 1) * 10, (i + 1) * 10)
-        assert torch.equal(rep.goal_memory[i], torch.as_tensor(expected_goal)), \
-            f"transition {i}: goal must be desired - achieved_prev"
-        assert torch.equal(rep.next_goal_memory[i], torch.as_tensor(expected_next_goal)), \
-            f"transition {i}: next_goal must be desired - achieved_next"
+def test_single_transition_action_stored_as_int():
+    eb = SACEpisodeBuffer()
+    obs = _obs()
+    eb.store(obs=obs, next_obs=obs, action=3, reward=0.0, done=False,
+             achieved_prev=np.zeros(2), achieved_next=np.zeros(2),
+             motion_prev=_motion(), motion_next=_motion())
+    assert eb._transitions[0].action == 3
+    assert isinstance(eb._transitions[0].action, int)
 
 
-def test_hindsight_relative_goal_vectors():
-    """Hindsight goals are future achieved_next positions; stored vectors must
-    be relative to this transition's prev/next positions. With K >= future
-    length on a 2-step episode, step 0's only hindsight goal is step 1's
-    achieved_next."""
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
+def test_single_transition_real_goal_is_world_displacement():
+    eb = SACEpisodeBuffer()
+    obs = _obs()
+    eb.store(obs=obs, next_obs=obs, action=1, reward=0.0, done=False,
+             achieved_prev=np.array([100.0, 100.0]),
+             achieved_next=np.array([104.0, 100.0]),
+             motion_prev=_motion(), motion_next=_motion())
+    rb = FakeReplayBuffer()
+    desired_goal = np.array([200.0, 100.0])
+    eb.send_to(rb, desired_goal=desired_goal,
+               compute_reward=fake_compute_reward, goal_noise_std=0.0, k=0)
 
-    _store_walk(ep, obs, 2)  # step 0: (0,0)->(10,10), step 1: (10,10)->(20,20)
-    ep.send_to(rep, _pos(300, 400), _dummy_compute_reward)
-
-    # Layout: 2 originals, then step 0's hindsight (step 1 has no future).
-    hg = _pos(20, 20)  # step 1's achieved_next
-    assert rep.mem_ctr == 3
-    assert torch.equal(rep.goal_memory[2], torch.as_tensor(hg - _pos(0, 0)))
-    assert torch.equal(rep.next_goal_memory[2], torch.as_tensor(hg - _pos(10, 10)))
-
-
-def test_hindsight_success_is_terminal():
-    """Relabeled success (reward 1) must store done=True; reward 0 stores done=False.
-
-    The env terminates on success, so hindsight transitions must match — otherwise
-    targets bootstrap past the goal and inflate Q in hindsight data.
-    """
-    def _success_compute_reward(ag, dg, info):
-        return np.ones(len(ag), dtype=np.float32)
-
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-
-    n = 3
-    _store_walk(ep, obs, n)
-    ep.send_to(rep, _pos(100, 100), _success_compute_reward)
-    # Layout: 3 original (reward 0 via stored value, done False) then hindsight.
-    # All hindsight rewards are 1.0 here -> all hindsight dones must be True.
-    cnt = rep.mem_ctr
-    assert cnt > n, "expected hindsight transitions beyond the originals"
-    assert not rep.terminal_memory[:n].any(), "original transitions must keep done=False"
-    assert rep.terminal_memory[n:cnt].all(), "hindsight successes must be terminal"
-
-    # And reward-0 relabels stay non-terminal.
-    ep2  = EpisodeBuffer()
-    rep2 = _make_replay()
-    _store_walk(ep2, obs, n)
-    ep2.send_to(rep2, _pos(100, 100), _dummy_compute_reward)
-    assert not rep2.terminal_memory[:rep2.mem_ctr].any(), "reward-0 relabels must stay done=False"
+    assert len(rb.calls) == 1
+    _, goal, _, action, _, _, next_goal, _, _ = rb.calls[0]
+    assert np.allclose(goal,      [200.0 - 100.0, 100.0 - 100.0])
+    assert np.allclose(next_goal, [200.0 - 104.0, 100.0 - 100.0])
+    assert action == 1
 
 
-def test_send_to_original_reward_preserved():
-    ep  = EpisodeBuffer()
-    rep = _make_replay()
-    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
+def test_hindsight_relabel_produces_terminal_success():
+    eb = SACEpisodeBuffer()
+    obs = _obs()
+    eb.store(obs=obs, next_obs=obs, action=0, reward=0.0, done=False,
+             achieved_prev=np.array([0.0, 0.0]),
+             achieved_next=np.array([10.0, 0.0]),
+             motion_prev=_motion(), motion_next=_motion())
+    eb.store(obs=obs, next_obs=obs, action=0, reward=0.0, done=False,
+             achieved_prev=np.array([10.0, 0.0]),
+             achieved_next=np.array([20.0, 0.0]),
+             motion_prev=_motion(), motion_next=_motion())
 
-    ep.store(obs, 0, 7.0, obs, False,
-             achieved_prev=_pos(0, 0), achieved_next=_pos(10, 10))
-    ep.send_to(rep, _pos(100, 100), _dummy_compute_reward)
+    rb = FakeReplayBuffer()
+    eb.send_to(rb, desired_goal=np.array([999.0, 999.0]),
+               compute_reward=fake_compute_reward, goal_noise_std=0.0, k=1)
 
-    # First stored transition is the original — reward must be 7.0
-    assert float(rep.reward_memory[0]) == 7.0
+    assert len(rb.calls) == 3
+    _, _, _, _, reward, _, _, _, done = rb.calls[-1]
+    assert reward == 1.0
+    assert done is True
+
+
+def test_clear_empties_buffer():
+    eb = SACEpisodeBuffer()
+    obs = _obs()
+    eb.store(obs=obs, next_obs=obs, action=0, reward=0.0, done=False,
+             achieved_prev=np.zeros(2), achieved_next=np.zeros(2),
+             motion_prev=_motion(), motion_next=_motion())
+    assert len(eb) == 1
+    eb.clear()
+    assert len(eb) == 0

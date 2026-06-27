@@ -1,72 +1,81 @@
-import torch
+"""Image-aware replay buffer for discrete SAC+HER.
+
+Actions are stored as int64 indices (not float vectors).
+Images stored as uint8, normalised to [0,1] at sample time.
+Goals and motions stored as float32.
+
+store_transition signature:
+    image      : (3, 96, 96) uint8 tensor
+    goal       : (2,)        float32  — noisy_world_vector [dx, dy]
+    motion     : (4,)        float32  — [dx/step, dy/step, 0, 0]
+    action     : int         — discrete action index
+    reward     : float
+    next_image : (3, 96, 96) uint8
+    next_goal  : (2,)        float32
+    next_motion: (4,)        float32
+    done       : bool
+
+sample_buffer returns:
+    (imgs, goals, motions, actions, rewards, next_imgs, next_goals, next_motions, dones)
+    actions: LongTensor (B,) — ready for .gather(1, actions.unsqueeze(1))
+"""
 import os
 
+import torch
 
-class ReplayBuffer:
-    def __init__(self, max_size, input_shape, input_device, output_device='cpu', goal_dim=2,
-                 motion_dim=0):
+
+class SACReplayBuffer:
+    IMAGE_SHAPE = (3, 96, 96)
+    GOAL_DIM    = 2
+    MOTION_DIM  = 4
+
+    def __init__(self, max_size, device='cpu'):
         self.mem_size = max_size
         self.mem_ctr  = 0
+        self.device   = device
 
         override = os.getenv("REPLAY_BUFFER_MEMORY")
-        if override in ["cpu", "cuda:0", "cuda:1"]:
-            print("Received replay buffer memory override.")
-            self.input_device = override
-        else:
-            self.input_device = input_device
+        if override in ("cpu", "cuda:0", "cuda:1"):
+            self.device = override
 
-        print(f"Replay buffer memory on: {self.input_device}")
-        self.output_device = output_device
-
-        self.state_memory      = torch.zeros((max_size, *input_shape), dtype=torch.uint8,   device=self.input_device)
-        self.next_state_memory = torch.zeros((max_size, *input_shape), dtype=torch.uint8,   device=self.input_device)
-        self.action_memory     = torch.zeros(max_size,                 dtype=torch.int64,   device=self.input_device)
-        self.reward_memory     = torch.zeros(max_size,                 dtype=torch.float32, device=self.input_device)
-        self.terminal_memory   = torch.zeros(max_size,                 dtype=torch.bool,    device=self.input_device)
-        # Relative goals change within a transition: Q(s, g) needs goal - pos_t
-        # while the bootstrap target Q(s', g) needs goal - pos_t+1.
-        self.goal_memory       = torch.zeros((max_size, goal_dim),     dtype=torch.float32, device=self.input_device)
-        self.next_goal_memory  = torch.zeros((max_size, goal_dim),     dtype=torch.float32, device=self.input_device)
-
-        # Previous-motion features (state-intrinsic; HER does not relabel them).
-        self.use_motion = motion_dim > 0
-        if self.use_motion:
-            self.motion_memory      = torch.zeros((max_size, motion_dim), dtype=torch.float32, device=self.input_device)
-            self.next_motion_memory = torch.zeros((max_size, motion_dim), dtype=torch.float32, device=self.input_device)
+        self.images       = torch.zeros((max_size, *self.IMAGE_SHAPE), dtype=torch.uint8,   device=self.device)
+        self.next_images  = torch.zeros((max_size, *self.IMAGE_SHAPE), dtype=torch.uint8,   device=self.device)
+        self.goals        = torch.zeros((max_size, self.GOAL_DIM),     dtype=torch.float32, device=self.device)
+        self.next_goals   = torch.zeros((max_size, self.GOAL_DIM),     dtype=torch.float32, device=self.device)
+        self.motions      = torch.zeros((max_size, self.MOTION_DIM),   dtype=torch.float32, device=self.device)
+        self.next_motions = torch.zeros((max_size, self.MOTION_DIM),   dtype=torch.float32, device=self.device)
+        self.actions      = torch.zeros(max_size,                      dtype=torch.int64,   device=self.device)
+        self.rewards      = torch.zeros(max_size,                      dtype=torch.float32, device=self.device)
+        self.dones        = torch.zeros(max_size,                      dtype=torch.bool,    device=self.device)
 
     def can_sample(self, batch_size: int) -> bool:
         return self.mem_ctr >= batch_size * 10
 
-    def store_transition(self, state, action, reward, next_state, done, goal, next_goal,
-                         motion=None, next_motion=None):
+    def store_transition(self, image, goal, motion, action, reward,
+                         next_image, next_goal, next_motion, done):
         idx = self.mem_ctr % self.mem_size
-        self.state_memory[idx]      = torch.as_tensor(state,      dtype=torch.uint8,   device=self.input_device)
-        self.next_state_memory[idx] = torch.as_tensor(next_state, dtype=torch.uint8,   device=self.input_device)
-        self.action_memory[idx]     = int(action)
-        self.reward_memory[idx]     = float(reward)
-        self.terminal_memory[idx]   = bool(done)
-        self.goal_memory[idx]       = torch.as_tensor(goal,      dtype=torch.float32, device=self.input_device)
-        self.next_goal_memory[idx]  = torch.as_tensor(next_goal, dtype=torch.float32, device=self.input_device)
-        if self.use_motion:
-            self.motion_memory[idx]      = torch.as_tensor(motion,      dtype=torch.float32, device=self.input_device)
-            self.next_motion_memory[idx] = torch.as_tensor(next_motion, dtype=torch.float32, device=self.input_device)
+        self.images[idx]       = torch.as_tensor(image,      dtype=torch.uint8,   device=self.device)
+        self.next_images[idx]  = torch.as_tensor(next_image, dtype=torch.uint8,   device=self.device)
+        self.goals[idx]        = torch.as_tensor(goal,       dtype=torch.float32, device=self.device)
+        self.next_goals[idx]   = torch.as_tensor(next_goal,  dtype=torch.float32, device=self.device)
+        self.motions[idx]      = torch.as_tensor(motion,     dtype=torch.float32, device=self.device)
+        self.next_motions[idx] = torch.as_tensor(next_motion,dtype=torch.float32, device=self.device)
+        self.actions[idx]      = int(action)
+        self.rewards[idx]      = float(reward)
+        self.dones[idx]        = bool(done)
         self.mem_ctr += 1
 
     def sample_buffer(self, batch_size):
         max_mem = min(self.mem_ctr, self.mem_size)
-        batch   = torch.randint(0, max_mem, (batch_size,), device=self.input_device, dtype=torch.int64)
-
-        states      = self.state_memory[batch].to(self.output_device,      dtype=torch.float32)
-        next_states = self.next_state_memory[batch].to(self.output_device, dtype=torch.float32)
-        actions     = self.action_memory[batch].to(self.output_device)
-        rewards     = self.reward_memory[batch].to(self.output_device)
-        dones       = self.terminal_memory[batch].to(self.output_device)
-        goals       = self.goal_memory[batch].to(self.output_device)
-        next_goals  = self.next_goal_memory[batch].to(self.output_device)
-
-        motions = next_motions = None
-        if self.use_motion:
-            motions      = self.motion_memory[batch].to(self.output_device)
-            next_motions = self.next_motion_memory[batch].to(self.output_device)
-
-        return states, actions, rewards, next_states, dones, goals, next_goals, motions, next_motions
+        idx = torch.randint(0, max_mem, (batch_size,), device=self.device)
+        return (
+            self.images[idx].float() / 255.0,
+            self.goals[idx],
+            self.motions[idx],
+            self.actions[idx],           # LongTensor (B,)
+            self.rewards[idx],
+            self.next_images[idx].float() / 255.0,
+            self.next_goals[idx],
+            self.next_motions[idx],
+            self.dones[idx],
+        )

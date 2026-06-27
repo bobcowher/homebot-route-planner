@@ -1,7 +1,7 @@
 import numpy as np
 import gymnasium as gym
 import torch
-from sac_agent import SACAgent
+from agent import SACAgent
 
 
 class FakeEnv:

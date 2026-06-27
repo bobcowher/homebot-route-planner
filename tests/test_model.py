@@ -1,5 +1,5 @@
 import torch
-from sac_model import DiscreteQNet, DiscretePolicy
+from model import DiscreteQNet, DiscretePolicy
 
 N_ACTIONS = 8
 BATCH     = 4

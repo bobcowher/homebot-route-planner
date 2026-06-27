@@ -1,5 +1,5 @@
 import numpy as np
-from sac_motion import motion_dim_continuous, make_motion_continuous, MotionStateContinuous
+from motion import motion_dim_continuous, make_motion_continuous, MotionStateContinuous
 
 
 def test_motion_dim_window_1():

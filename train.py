@@ -1,50 +1,71 @@
-from agent import Agent
-import gymnasium as gym
-import homebot
+"""Discrete SAC + HER on the collect_trash leg.
 
-# REAL-REWARD REACH FIX (champion 314 architecture). The whack-a-mole "reach"
-# failure traced to a reward bug: the goal env rewarded + terminated every goal at a
-# flat GOAL_THRESHOLD=79px (compute_reward), but the task actually collects trash only
-# at 31px (tasks.py). We trained the policy to park at 79 and graded it at 31.
-# FIX (no per-target hand-engineering):
-#   - env.step now uses the TaskManager's TRUE per-target reward and terminates on
-#     real task completion (is_done), not a geometric radius.
-#   - compute_reward is demoted to the HER hindsight relabel proxy ONLY, at a single
-#     tight RELABEL_RADIUS=31 (the tightest real radius; satisfies door/fixtures too).
-# Goal = the trash pile itself (random_goal_tiles OFF). n_trash=1 so the single trash
-# == the conditioned goal == the completion event (at n_trash=2 the real reward fires
-# for EITHER pile, decoupling reward from the goal coord). spawn_trash is uniform over
-# valid floor tiles, so a single random trash keeps full-map coverage -- we get an
-# arbitrary-coord reacher AND a real reward, not a fixed-spot specialist.
-# Clean A/B vs 314 (4.30/38% chain, 5.8% deploy spin) on the collect_trash leg:
-# chained_eval.py + spin_metric. her_anneal_start=None keeps HER's dense relabel
-# grounding the whole run (the tight 31px target needs it).
-#
-# GOAL REPRESENTATION: noisy world vector [dx, dy] + N(0, 30px²) instead of
-# absolute coords [robot_x, robot_y, goal_x, goal_y]. Relative displacement so
-# the network can't memorize a position→action lookup (the memorization path
-# that the coord rep left open). Gaussian noise (30px ≈ 1 tile ≈ ~47cm) simulates
-# the shaky-map reality and breaks the memorization key further — same position
-# gives a different noisy vector each visit, forcing a smooth "approach the goal"
-# skill rather than a lookup table. Hypothesis: this is the rep change that makes
-# the value field less flat far from goal (the root cause of transit cycles).
-# A/B vs 325 (absolute coords, no noise) on chained_eval + spin_metric + the new
-# maps Robert is building (generalization test).
+CNN-based policy: image (96×96 RGB) + noisy_world_vector goal + motion.
+Discrete action space (8 actions) — same as the DQN champion.
+"""
+import gymnasium as gym
+import homebot  # noqa: F401
+
+from agent import SACAgent
+
 env = gym.make(
     "HomeBot2D-Goal-V1",
     render_mode="rgb_array",
     action_mode="discrete",
     obs_resolution=(96, 96),
-    n_trash=1,           # single trash == conditioned goal == completion event
+    n_trash=1,
+    # max_steps 1000 (champion fidelity). 250 was a run-341 fix to bound the Q-divergence
+    # horizon — but that divergence belonged to the undersized 2x256 critic + the autotuner's
+    # entropy-bonus runaway, BOTH now gone (4x512 critic, fixed alpha 0.1, critic-greedy
+    # behaviour). The champion used 1000, and on random_start it matters: longer trajectories
+    # give HER far more/better relabel data and let the agent actually traverse to far goals.
+    # Every SAC run plateaued at 3-10% with 250; this restores the champion's data regime.
     max_steps=1000,
     map_name="default",
     goals=["collect_trash"],
-    random_start=True,   # env owns spawn (uniform valid tile, >=60px from goals)
+    random_start=True,
 )
 
-agent = Agent(env=env, max_buffer_size=200000, goal_layers=2, head_layers=4,
-              use_motion=True, motion_window=1,
-              goal_noise_std=30.0)
+agent = SACAgent(
+    env=env,
+    max_buffer_size=200000,
+    # gamma 0.99: run 344 showed 0.95 over-contracts — the reward barely propagates
+    # (0.95^130~0.001) so the critic learns Q~0 everywhere and reaches collapsed to ~1%.
+    # Critic stability is now handled by CAPACITY (4x512 critic head, sac_model.py) — run
+    # 346 showed the champion-sized critic recovers from commitment-induced Q-spikes that
+    # diverged the undersized 2x256 — so gamma stays high for long-range credit assignment.
+    gamma=0.99,
+    tau=0.005,
+    # FIXED alpha 0.1, autotune OFF. Auto-entropy-tuning never converged usefully here (every
+    # variant oscillated, collapsed, or went inert — runs 336/342/347/348/354) — matches
+    # Robert's experience that SAC auto-alpha reliably lands on static ~0.1 anyway. Exploration
+    # is moved to epsilon-greedy ARGMAX behaviour (below), so alpha is just a mild actor entropy
+    # regulariser, not the explore/exploit knob.
+    alpha=0.1,
+    lr=3e-4,
+    goal_noise_std=30.0,
+    autotune_alpha=False,
+    # Symmetric deep 4x512 heads (run 353's flat-wide 2x1024 critic diverged 100x worse,
+    # critic_loss -> 2e6, ~4% vs 352's ~10%: the value field needs depth, per the champion).
+    actor_head_layers=4, actor_head_hidden=512,
+    critic_head_layers=4, critic_head_hidden=512,
+)
 
-agent.train(episodes=1800, batch_size=64, eval_interval=50, eval_episodes=20,
-            chain_eval_interval=10, her_anneal_start=None)
+# Warmup: fill the buffer with random transitions before any gradient update,
+# so the critic doesn't bootstrap off a near-empty, undiverse buffer and blow up
+# (the run-334 mean_q -> 104 divergence). 5k random steps.
+#
+# NO start-distance curriculum. HER IS the curriculum: relabeling to achieved goals trains
+# the agent on goals it actually reached (automatically easy-first, shrinking as it improves),
+# so it learns goal-conditioned navigation from local moves without ever reaching the true
+# goal — exactly how the DQN champion learned far-spawn reaching with random_start + HER and
+# no start curriculum. The earlier diffusion argument for a curriculum was wrong for HER, and
+# every no-curriculum SAC run (334/337) was under-capacity (2x256). This is the clean test:
+# the champion recipe with the one proven SAC change (4x512 critic) + HER + env random_start.
+# Epsilon-greedy ARGMAX behaviour (the champion's exploration, faithfully): random action
+# w.p. epsilon, else argmax(policy). epsilon 1.0 -> 0.1, decay 0.977/episode (champion values;
+# hits 0.1 by ~ep100). Argmax COMMITS regardless of Q-spread size — a low-temp softmax does
+# not (runs 352/354 only committed when a lucky Q-spike happened to force it). This is the
+# mechanism that lets the actor exploit the HER critic and close DQN's virtuous loop.
+agent.train(episodes=1200, batch_size=64, warmup_steps=5000,
+            epsilon_start=1.0, epsilon_min=0.1, epsilon_decay=0.977)
