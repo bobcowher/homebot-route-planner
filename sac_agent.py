@@ -137,6 +137,19 @@ class SACAgent:
         action, _ = self.policy.get_action(img, goal, mot, evaluate=evaluate)
         return action.item()
 
+    def greedy_critic_action(self, obs_tensor, goal_np, motion_np):
+        """argmax_a min(q1,q2)(s,a) — act greedily on the CRITIC, not the actor. The HER
+        critic holds the (small) inter-action advantage that the entropy-regularised actor
+        washes out (run 355: mean_q 7.3 but actor entropy stuck at 1.93). Argmax follows
+        that advantage regardless of how small it is — the DQN mechanism. For discrete
+        actions the actor is redundant for behaviour; it only feeds the soft-value bootstrap."""
+        img  = self._to_device_float(obs_tensor)
+        goal = self._goal_tensor(goal_np)
+        mot  = self._motion_tensor(motion_np)
+        with torch.no_grad():
+            q1, q2 = self.critic(img, goal, mot)
+            return int(torch.min(q1, q2).argmax(dim=-1).item())
+
     # ------------------------------------------------------------------
     # Discrete SAC update
     # ------------------------------------------------------------------
@@ -285,7 +298,7 @@ class SACAgent:
             if collect_only or (epsilon is not None and random.random() < epsilon):
                 action = int(self.env.action_space.sample())
             elif epsilon is not None:
-                action = self.select_action(obs, goal_prev, motion_prev, evaluate=True)
+                action = self.greedy_critic_action(obs, goal_prev, motion_prev)
             else:
                 action = self.select_action(obs, goal_prev, motion_prev)
 
