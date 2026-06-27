@@ -24,23 +24,16 @@ def _fill_buffer(agent, n):
         )
 
 
-def test_select_action_returns_valid_index():
+def test_greedy_critic_action_is_valid_and_deterministic():
+    """Behaviour comes from the critic (argmax min-Q): a valid index, and deterministic."""
     agent = _make_agent()
     obs_tensor = torch.randint(0, 256, (3, 96, 96), dtype=torch.uint8)
     goal_np    = np.array([100.0, 200.0], dtype=np.float32)
     motion_np  = np.zeros(4, dtype=np.float32)
-    action = agent.select_action(obs_tensor, goal_np, motion_np)
-    assert isinstance(action, int)
-    assert 0 <= action < agent.n_actions
-
-
-def test_select_action_evaluate_is_deterministic():
-    agent = _make_agent()
-    obs_tensor = torch.randint(0, 256, (3, 96, 96), dtype=torch.uint8)
-    goal_np    = np.array([100.0, 200.0], dtype=np.float32)
-    motion_np  = np.zeros(4, dtype=np.float32)
-    a1 = agent.select_action(obs_tensor, goal_np, motion_np, evaluate=True)
-    a2 = agent.select_action(obs_tensor, goal_np, motion_np, evaluate=True)
+    a1 = agent.greedy_critic_action(obs_tensor, goal_np, motion_np)
+    a2 = agent.greedy_critic_action(obs_tensor, goal_np, motion_np)
+    assert isinstance(a1, int)
+    assert 0 <= a1 < agent.n_actions
     assert a1 == a2
 
 

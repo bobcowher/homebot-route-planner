@@ -1,18 +1,14 @@
-"""Discrete SAC actor/critic for HomeBotGoalEnv (discrete action mode).
+"""Discrete SAC actor/critic networks for HomeBot2D-Goal (discrete action mode).
 
-Architecture: separate CNN actor + CNN double-Q critic, no weight sharing.
-Both inherit _CNNBase (same conv stack as DQN champion QModel).
+Separate CNN actor + CNN double-Q critic (no weight sharing), both on _CNNBase:
+  - DiscreteQNet  : (image, goal, motion) -> (q1, q2), each (B, n_actions). No action
+                    input; outputs Q for every action at once.
+  - DiscretePolicy: (image, goal, motion) -> (probs, log_probs), a categorical dist.
 
-Key difference from continuous SAC:
-  - DiscreteQNet:  takes (image, goal, motion) → (q1, q2) each (B, n_actions)
-                   NO action input; outputs Q for every action simultaneously
-  - DiscretePolicy: takes (image, goal, motion) → (probs, log_probs) each (B, n_actions)
-                    categorical distribution, no reparameterisation needed
-
-Discrete SAC update rule (Christodoulou 2019):
-  V(s') = Σ_a π(a|s') [Q_target(s', a) - α log π(a|s')]   (exact expectation)
-  L_critic = MSE(Q(s, a_taken), r + γ V(s'))               (per taken action)
-  L_actor  = Σ_a π(a|s)  [α log π(a|s) - min_Q(s, a)]     (full expectation)
+Discrete SAC update (Christodoulou 2019):
+  V(s')    = Σ_a π(a|s')[Q_target(s', a) - α logπ(a|s')]
+  L_critic = MSE(Q(s, a), r + γ V(s'))
+  L_actor  = Σ_a π(a|s)[α logπ(a|s) - min_Q(s, a)]
 """
 import os
 
@@ -20,17 +16,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-LOG_SIG_MIN = -4   # kept for reference, not used in discrete policy
-
 GOAL_SCALE  = (864.0, 576.0)
 GOAL_HIDDEN = 128
 MOTION_HIDDEN = 32
-# Head depth/width matched to the DQN champion (QModel head_layers=4, fc_hidden=512).
-# The champion deliberately needed depth-4 to represent a value field that isn't flat
-# far from the goal (train.py: "the root cause of transit cycles"); the original SAC
-# port used a 2x256 head, which is both under-capacity for that value field and easily
-# normalised into mush. No LayerNorm — the champion ran head_norm=False and was stable;
-# LN was a patch for the undersized critic and it killed the Q-spread (run 345).
+# 4x512 heads. The value field isn't flat far from the goal, so the head needs depth-4
+# to represent it (a 2x256 head under-fits and plateaus). No LayerNorm — it bounds the
+# critic but normalises away the small inter-action Q-spread that behaviour relies on.
 HEAD_HIDDEN = 512
 HEAD_LAYERS = 4
 CNN_FLAT    = 4096   # 64 * 8 * 8  (verified via dummy forward)
@@ -45,8 +36,8 @@ def _conv_forward(x, conv1, conv2, conv3):
 
 def _mlp_head(in_dim, hidden, n_layers):
     """A stack of n_layers Linear(->hidden); caller applies ReLU after each and its own
-    output projection. Mirrors QModel's head ModuleList (the depth lever for the coord
-    value field)."""
+    output projection. A depth lever for the coordinate
+    value field."""
     layers, d = nn.ModuleList(), in_dim
     for _ in range(n_layers):
         layers.append(nn.Linear(d, hidden))
@@ -100,7 +91,7 @@ class DiscreteQNet(_CNNBase):
     Critic loss indexes into the vector with the taken action via .gather().
     """
 
-    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_critic',
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='critic',
                  head_layers=HEAD_LAYERS, head_hidden=HEAD_HIDDEN):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
@@ -143,14 +134,14 @@ class DiscretePolicy(_CNNBase):
     get_action() samples or argmaxes for exploration / evaluation.
     """
 
-    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='sac_policy',
+    def __init__(self, n_actions, checkpoint_dir='checkpoints', name='actor',
                  head_layers=HEAD_LAYERS, head_hidden=HEAD_HIDDEN):
         super().__init__()
         self.checkpoint_dir = checkpoint_dir
         self.name = name
         self.checkpoint_file = os.path.join(checkpoint_dir, f'{name}.pt')
 
-        # Same head depth/width as the critic (symmetric), matching the champion's 4x512.
+        # Same depth/width as the critic (symmetric 4x512).
         self.fc = _mlp_head(self.feature_dim, head_hidden, head_layers)
         self.out = nn.Linear(head_hidden, n_actions)
 

@@ -1,9 +1,7 @@
+#!/usr/bin/env bash
+# Train discrete SAC + HER on HomeBot2D. Activates the project conda env and runs train.py.
+set -e
 source ~/anaconda3/etc/profile.d/conda.sh
-
-conda env list | grep -q "^car-racing " || conda create -n car-racing python=3.12 -y
-
-conda activate sac-homebot
-
-#pip install -r requirements.txt
-
+conda activate beekeeper-sac-homebot-route-planner
+# pip install -r requirements.txt
 python -u ./train.py
