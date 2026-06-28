@@ -6,9 +6,11 @@ The recipe (actor-driven discrete SAC):
   - Canonical critic (matches the working ant-maze SAC reference): min-double-Q soft target
     + plain MSE + polyak target tau=0.005, static alpha=0.1. (The avg/Q-clip/hard-sync patches
     were reverted — they were workarounds for the old argmax-over-critic behaviour.)
-  - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action). A sampled soft
-    policy avoids the deterministic A<->B oscillation that argmax-over-critic (= DQN) falls
-    into; the actor's entropy is the exploration — no epsilon-greedy.
+  - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action), with a DECAYING
+    fraction of WHOLE episodes run as pure front-biased directed traversals (Q-schedule
+    1.0 -> 0.25 floor). Sparse 0/1 reward gives no advantage on its own; the directed
+    episodes feed HER clean map-crossing goal-reaching trajectories so the critic learns a
+    real far-goal advantage for the actor to concentrate onto. Actor episodes read true reach.
   - max_steps=1000: long trajectories give HER rich relabel data and let the agent
     traverse to far random-start goals.
 """
@@ -47,4 +49,5 @@ agent = SACAgent(
     head_hidden=512,
 )
 
-agent.train(episodes=2000, batch_size=64, warmup_steps=5000)
+agent.train(episodes=2000, batch_size=64, warmup_steps=5000,
+            explore_start=1.0, explore_min=0.25, explore_decay=0.977)

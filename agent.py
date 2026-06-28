@@ -204,7 +204,7 @@ class SACAgent:
     # Training loop
     # ------------------------------------------------------------------
 
-    def _run_episode(self, collect_only=False, batch_size=64):
+    def _run_episode(self, collect_only=False, batch_size=64, directed_episode=False):
         raw_obs, _ = self.env.reset()
         base = self.env.unwrapped
         r = base._robot
@@ -225,10 +225,12 @@ class SACAgent:
             goal_prev   = noisy_world_vector(r.x, r.y, desired_goal[0], desired_goal[1],
                                              self.goal_noise_std)
 
-            # Behaviour: front-biased directed walk during warmup (uniform-random wobbles in
-            # place — see _biased_explore_action), else sample the stochastic actor (the
-            # actor's entropy is the exploration — no epsilon-greedy).
-            if collect_only:
+            # Behaviour: an entire episode is either a directed-walk traversal or actor-driven.
+            # Per-EPISODE (not per-step) is the fix for run 382: a per-step mix let the actor's
+            # wobble dominate the trajectory so it never crossed the map. A whole directed
+            # episode gives HER a clean map-crossing, goal-reaching trajectory to relabel —
+            # the real far-goal advantage the actor needs. Warmup is always directed.
+            if collect_only or directed_episode:
                 action = self._biased_explore_action()
             else:
                 action = self.sample_actor_action(obs, goal_prev, motion_prev)
@@ -269,7 +271,8 @@ class SACAgent:
         return (episode_reward, episode_steps,
                 critic_loss_sum, actor_loss_sum, mean_q_sum, entropy_sum, update_count)
 
-    def train(self, episodes=1200, batch_size=64, run_tag=None, warmup_steps=5000):
+    def train(self, episodes=1200, batch_size=64, run_tag=None, warmup_steps=5000,
+              explore_start=1.0, explore_min=0.25, explore_decay=0.977):
         run_tag = run_tag or self._run_tag()
         writer  = SummaryWriter(
             f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
@@ -283,19 +286,30 @@ class SACAgent:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
+            # Decaying fraction of WHOLE episodes are pure directed traversals (Q-learning
+            # schedule): heavy early to seed the critic with map-crossing, goal-reaching
+            # trajectories for HER, fading to a floor (~0.25) so ~1/4 of episodes keep feeding
+            # real far-goal data. The remaining episodes are pure actor — that's where we read
+            # the policy's true reach.
+            explore_rate = max(explore_min, explore_start * (explore_decay ** episode))
+            directed_episode = random.random() < explore_rate
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
-                self._run_episode(collect_only=False, batch_size=batch_size)
+                self._run_episode(collect_only=False, batch_size=batch_size,
+                                  directed_episode=directed_episode)
 
             writer.add_scalar("Train/episode_reward", ep_reward, episode)
             writer.add_scalar("Train/episode_steps",  ep_steps,  episode)
+            writer.add_scalar("Train/explore_rate",   explore_rate, episode)
+            writer.add_scalar("Train/directed_episode", float(directed_episode), episode)
             if n_updates > 0:
                 writer.add_scalar("loss/critic",          cl_sum  / n_updates, episode)
                 writer.add_scalar("loss/actor",           al_sum  / n_updates, episode)
                 writer.add_scalar("Train/mean_q",         mq_sum  / n_updates, episode)
                 writer.add_scalar("Train/policy_entropy", ent_sum / n_updates, episode)
 
-            print(f"Episode {episode} | reward: {ep_reward:.2f} | "
-                  f"steps: {ep_steps} | entropy: {ent_sum / max(n_updates, 1):.3f}")
+            tag = "DIR" if directed_episode else "act"
+            print(f"Episode {episode} [{tag}] | reward: {ep_reward:.2f} | steps: {ep_steps} | "
+                  f"explore: {explore_rate:.3f} | entropy: {ent_sum / max(n_updates, 1):.3f}")
             if episode % 50 == 0:
                 self.save_checkpoint()
 
