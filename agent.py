@@ -23,6 +23,7 @@ Discrete SAC update:
 import cv2
 import datetime
 import os
+import random
 import subprocess
 
 import numpy as np
@@ -70,6 +71,7 @@ class SACAgent:
         self.episode_buffer = SACEpisodeBuffer()
         self.total_env_steps = 0
         self.total_grad_steps = 0
+        self._explore_heading = None   # persistent heading for front-biased warmup walk
 
     # ------------------------------------------------------------------
     # Observation pipeline + tensor helpers
@@ -110,6 +112,27 @@ class SACAgent:
             if greedy:
                 return int(probs.argmax(dim=-1).item())
             return int(torch.distributions.Categorical(probs=probs).sample().item())
+
+    def _biased_explore_action(self):
+        """Front-biased warmup explorer. The 8 discrete actions are ABSOLUTE compass dirs
+        ordered around a ring (homebot.robot._DIRS: 0=N,1=NE,...,7=NW, 45° apart), and they
+        are symmetric — uniform-random has ZERO mean displacement (N/S, E/W cancel), so the
+        bot wobbles in place and HER gets a degenerate near-stationary trajectory. Instead
+        keep a persistent heading and draw the next move from the forward 120° arc around it:
+        50% straight ahead, 50% split across gentle (±1) / hard (±2) turns. NEVER the reverse
+        (h+4) or backward-leaning (h±3) dirs. Yields directed, map-covering walks that give
+        HER real trajectory to relabel. (Discrete analog of the diff-drive 'forward + turns,
+        never back' prior — maps literally onto the continuous action space later. Relies on
+        the action indices being ring-ordered, which _DIRS is.)
+        """
+        n = self.n_actions
+        if self._explore_heading is None:
+            self._explore_heading = random.randrange(n)
+        offsets = (0, 1, -1, 2, -2)            # forward, gentle turns, hard turns
+        weights = (0.50, 0.15, 0.15, 0.10, 0.10)
+        off = random.choices(offsets, weights=weights)[0]
+        self._explore_heading = (self._explore_heading + off) % n
+        return self._explore_heading
 
     # ------------------------------------------------------------------
     # Discrete SAC update
@@ -199,6 +222,7 @@ class SACAgent:
         r = base._robot
         desired_goal = raw_obs["desired_goal"]
         ms  = MotionStateDiscrete()
+        self._explore_heading = None   # fresh random bearing per warmup episode
         obs = self.process_observation(raw_obs["observation"])
 
         done = False
@@ -213,10 +237,11 @@ class SACAgent:
             goal_prev   = noisy_world_vector(r.x, r.y, desired_goal[0], desired_goal[1],
                                              self.goal_noise_std)
 
-            # Behaviour: random during warmup, else sample the stochastic actor (the actor's
-            # entropy is the exploration — no epsilon-greedy).
+            # Behaviour: front-biased directed walk during warmup (uniform-random wobbles in
+            # place — see _biased_explore_action), else sample the stochastic actor (the
+            # actor's entropy is the exploration — no epsilon-greedy).
             if collect_only:
-                action = int(self.env.action_space.sample())
+                action = self._biased_explore_action()
             else:
                 action = self.sample_actor_action(obs, goal_prev, motion_prev)
 
