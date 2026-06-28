@@ -46,6 +46,7 @@ class SACAgent:
         self.n_actions = env.action_space.n
         self.gamma = gamma
         self.tau = tau
+        self.target_update_interval = 1000  # hard target sync cadence (grad-steps)
         self.alpha = alpha            # fixed entropy temperature (a mild actor regulariser)
         self.goal_noise_std = goal_noise_std
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -133,9 +134,14 @@ class SACAgent:
         actor_loss.backward()
         self.policy_optim.step()
 
-        # Polyak target update.
-        for target_p, p in zip(self.critic_target.parameters(), self.critic.parameters()):
-            target_p.data.copy_(self.tau * p.data + (1 - self.tau) * target_p.data)
+        # Hard target sync: freeze the target for target_update_interval grad-steps,
+        # then copy the online critic wholesale. Polyak (tau every step) tracks the
+        # online net continuously, so the overestimation feeds itself — online chases
+        # a target that chases online — and every polyak run diverged (mean_q -> 1e3+,
+        # entropy collapsed). A frozen target breaks that bootstrap feedback loop.
+        # The champion's stabiliser; lr/Huber/clip only slowed or starved the runaway.
+        if self.total_grad_steps % self.target_update_interval == 0:
+            self.critic_target.load_state_dict(self.critic.state_dict())
 
         self.total_grad_steps += 1
         mean_q  = min_q.mean().item()
