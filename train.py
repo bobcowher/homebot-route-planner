@@ -3,8 +3,9 @@
 The recipe (actor-driven discrete SAC):
   - 4x512 double-Q critic + categorical actor.
   - HER (relabel to achieved goals) — this is the curriculum; no spawn/reach curriculum.
-  - Stable critic: avg target + Q-clip + hard target sync @1000 + alpha=0.01 (arXiv
-    2209.10081). The critic only has to feed the actor a gradient, not be argmax-reachable.
+  - Canonical critic (matches the working ant-maze SAC reference): min-double-Q soft target
+    + plain MSE + polyak target tau=0.005, static alpha=0.1. (The avg/Q-clip/hard-sync patches
+    were reverted — they were workarounds for the old argmax-over-critic behaviour.)
   - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action). A sampled soft
     policy avoids the deterministic A<->B oscillation that argmax-over-critic (= DQN) falls
     into; the actor's entropy is the exploration — no epsilon-greedy.
