@@ -1,11 +1,13 @@
 """Train discrete SAC + HER on the HomeBot2D collect_trash leg (full random start).
 
-The working recipe (learns full-map goal-conditioned navigation):
+The recipe (actor-driven discrete SAC):
   - 4x512 double-Q critic + categorical actor.
   - HER (relabel to achieved goals) — this is the curriculum; no spawn/reach curriculum.
-  - Fixed temperature alpha=0.1 (auto-tuning never converged usefully here).
-  - Behaviour = epsilon-greedy ARGMAX over the critic (see agent.greedy_critic_action),
-    epsilon 1.0 -> 0.1. The actor only feeds the soft-value bootstrap.
+  - Stable critic: avg target + Q-clip + hard target sync @1000 + alpha=0.01 (arXiv
+    2209.10081). The critic only has to feed the actor a gradient, not be argmax-reachable.
+  - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action). A sampled soft
+    policy avoids the deterministic A<->B oscillation that argmax-over-critic (= DQN) falls
+    into; the actor's entropy is the exploration — no epsilon-greedy.
   - max_steps=1000: long trajectories give HER rich relabel data and let the agent
     traverse to far random-start goals.
 """
@@ -42,5 +44,4 @@ agent = SACAgent(
     head_hidden=512,
 )
 
-agent.train(episodes=2000, batch_size=64, warmup_steps=5000,
-            epsilon_start=1.0, epsilon_min=0.1, epsilon_decay=0.977)
+agent.train(episodes=2000, batch_size=64, warmup_steps=5000)

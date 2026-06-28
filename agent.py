@@ -4,10 +4,11 @@ The recipe that learns full random-start navigation:
   - Double-Q critic + categorical actor (Christodoulou 2019 discrete SAC update).
   - HER on the episode buffer (relabel to achieved goals) — HER *is* the curriculum.
   - Fixed temperature alpha (no auto-tuning — it never converged usefully here).
-  - Behaviour = epsilon-greedy ARGMAX over the CRITIC (min Q), not the actor. The HER
-    critic holds the small inter-action goal-advantage that the entropy-regularised actor
-    washes out; argmax follows it regardless of magnitude (the DQN mechanism). The actor
-    only feeds the soft-value bootstrap.
+  - Behaviour = SAMPLE a ~ π(·|s) from the stochastic actor. A sampled soft policy cannot
+    lock into the deterministic A<->B oscillation that argmax-over-critic (= DQN) falls
+    into; the actor's own entropy is the exploration (no epsilon-greedy). This is the whole
+    reason for actor-critic here. The critic only has to give the actor a usable gradient —
+    it does NOT need to be argmax-reachable.
 
 Observation pipeline:
   image  : 96x96 RGB -> permute(2,0,1) -> uint8
@@ -22,7 +23,6 @@ Discrete SAC update:
 import cv2
 import datetime
 import os
-import random
 import subprocess
 
 import numpy as np
@@ -89,13 +89,27 @@ class SACAgent:
         return torch.as_tensor(motion_np, dtype=torch.float32, device=self.device).unsqueeze(0)
 
     def greedy_critic_action(self, obs_tensor, goal_np, motion_np):
-        """argmax_a min(q1, q2)(s, a) — behaviour comes from the CRITIC, not the actor."""
+        """argmax_a min(q1, q2)(s, a) — the OLD DQN-in-costume behaviour. Kept for eval
+        comparison only; the live policy now samples the actor (sample_actor_action)."""
         img  = self._to_device_float(obs_tensor)
         goal = self._goal_tensor(goal_np)
         mot  = self._motion_tensor(motion_np)
         with torch.no_grad():
             q1, q2 = self.critic(img, goal, mot)
             return int(torch.min(q1, q2).argmax(dim=-1).item())
+
+    def sample_actor_action(self, obs_tensor, goal_np, motion_np, greedy=False):
+        """Behaviour: sample a ~ π(·|s) from the stochastic actor (greedy=True -> argmax π
+        for deterministic eval). Sampling is what breaks the deterministic A<->B oscillation
+        that drove us off DQN, and the actor's entropy supplies exploration."""
+        img  = self._to_device_float(obs_tensor)
+        goal = self._goal_tensor(goal_np)
+        mot  = self._motion_tensor(motion_np)
+        with torch.no_grad():
+            probs, _ = self.policy(img, goal, mot)
+            if greedy:
+                return int(probs.argmax(dim=-1).item())
+            return int(torch.distributions.Categorical(probs=probs).sample().item())
 
     # ------------------------------------------------------------------
     # Discrete SAC update
@@ -179,7 +193,7 @@ class SACAgent:
     # Training loop
     # ------------------------------------------------------------------
 
-    def _run_episode(self, collect_only=False, batch_size=64, epsilon=0.0):
+    def _run_episode(self, collect_only=False, batch_size=64):
         raw_obs, _ = self.env.reset()
         base = self.env.unwrapped
         r = base._robot
@@ -199,11 +213,12 @@ class SACAgent:
             goal_prev   = noisy_world_vector(r.x, r.y, desired_goal[0], desired_goal[1],
                                              self.goal_noise_std)
 
-            # Epsilon-greedy argmax over the critic.
-            if collect_only or random.random() < epsilon:
+            # Behaviour: random during warmup, else sample the stochastic actor (the actor's
+            # entropy is the exploration — no epsilon-greedy).
+            if collect_only:
                 action = int(self.env.action_space.sample())
             else:
-                action = self.greedy_critic_action(obs, goal_prev, motion_prev)
+                action = self.sample_actor_action(obs, goal_prev, motion_prev)
 
             ms.commit(r.x, r.y, action)
             raw_next, reward, term, trunc, _ = self.env.step(action)
@@ -241,8 +256,7 @@ class SACAgent:
         return (episode_reward, episode_steps,
                 critic_loss_sum, actor_loss_sum, mean_q_sum, entropy_sum, update_count)
 
-    def train(self, episodes=1200, batch_size=64, run_tag=None, warmup_steps=5000,
-              epsilon_start=1.0, epsilon_min=0.1, epsilon_decay=0.977):
+    def train(self, episodes=1200, batch_size=64, run_tag=None, warmup_steps=5000):
         run_tag = run_tag or self._run_tag()
         writer  = SummaryWriter(
             f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
@@ -256,13 +270,11 @@ class SACAgent:
             print(f"[warmup] {warmup_done} random steps collected")
 
         for episode in range(episodes):
-            epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** episode))
             ep_reward, ep_steps, cl_sum, al_sum, mq_sum, ent_sum, n_updates = \
-                self._run_episode(collect_only=False, batch_size=batch_size, epsilon=epsilon)
+                self._run_episode(collect_only=False, batch_size=batch_size)
 
             writer.add_scalar("Train/episode_reward", ep_reward, episode)
             writer.add_scalar("Train/episode_steps",  ep_steps,  episode)
-            writer.add_scalar("Train/epsilon",        epsilon,   episode)
             if n_updates > 0:
                 writer.add_scalar("loss/critic",          cl_sum  / n_updates, episode)
                 writer.add_scalar("loss/actor",           al_sum  / n_updates, episode)
@@ -270,7 +282,7 @@ class SACAgent:
                 writer.add_scalar("Train/policy_entropy", ent_sum / n_updates, episode)
 
             print(f"Episode {episode} | reward: {ep_reward:.2f} | "
-                  f"steps: {ep_steps} | eps: {epsilon:.3f}")
+                  f"steps: {ep_steps} | entropy: {ent_sum / max(n_updates, 1):.3f}")
             if episode % 50 == 0:
                 self.save_checkpoint()
 
