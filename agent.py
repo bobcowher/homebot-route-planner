@@ -15,8 +15,8 @@ Observation pipeline:
   motion : MotionStateDiscrete -> [dx/step, dy/step, 0, 0] float32
 
 Discrete SAC update:
-  V(s')  = Σ_a π(a|s')[Q_target(s', a) - α logπ(a|s')]
-  critic : MSE(Q(s, a), r + γ(1 - done)·V(s'))
+  V(s')  = Σ_a π(a|s')[avg_Q_target(s', a) - α logπ(a|s')]   (avg, not min — see arXiv 2209.10081)
+  critic : MSE(Q(s, a), clip(target - Q, ±q_clip) + Q)        (Q-clip Bellman error)
   actor  : Σ_a π(a|s)[α logπ(a|s) - min_Q(s, a)]
 """
 import cv2
@@ -47,6 +47,7 @@ class SACAgent:
         self.gamma = gamma
         self.tau = tau
         self.target_update_interval = 1000  # hard target sync cadence (grad-steps)
+        self.q_clip = 1.0             # Bellman-error clip bound (Revisiting Discrete SAC)
         self.alpha = alpha            # fixed entropy temperature (a mild actor regulariser)
         self.goal_noise_std = goal_noise_std
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -107,19 +108,30 @@ class SACAgent:
         rewards = rewards.unsqueeze(1)
         mask    = (~dones).float().unsqueeze(1)
 
-        # Critic target: soft value V(s') over the discrete action expectation.
+        # Critic target: soft value V(s') over the discrete action expectation, using the
+        # AVERAGE of the two target heads instead of their min (Revisiting Discrete SAC,
+        # arXiv 2209.10081 — "double average Q-learning"). The clipped-double-Q min is
+        # deliberately pessimistic; in discrete SAC that pessimism, once entropy collapses,
+        # drags mean_q steadily negative (run 371's slow-drift collapse). avg removes the
+        # underestimation bias while keeping two critics for variance reduction.
         with torch.no_grad():
             next_probs, next_log_probs = self.policy(next_imgs, next_goals, next_motions)
             q1_next, q2_next = self.critic_target(next_imgs, next_goals, next_motions)
-            min_q_next = torch.min(q1_next, q2_next)
-            v_next = (next_probs * (min_q_next - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
+            avg_q_next = 0.5 * (q1_next + q2_next)
+            v_next = (next_probs * (avg_q_next - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
             target_q = rewards + mask * self.gamma * v_next
 
-        # Critic loss: Q for the taken action vs target.
+        # Critic loss with Q-clip (Revisiting Discrete SAC, arXiv 2209.10081): clip each
+        # head's Bellman error to +/- q_clip before the MSE, so a single mis-estimated target
+        # can't yank the critic in one step (PPO-style value clipping — the stability half of
+        # the paper's fix, paired with the avg target above). Reward scale is sparse 0/1, so
+        # well-formed |Q| stays ~<=1; q_clip=1.0 bounds a step without starving learning.
         q1, q2 = self.critic(imgs, goals, motions)
         q1_a = q1.gather(1, actions.unsqueeze(1))
         q2_a = q2.gather(1, actions.unsqueeze(1))
-        critic_loss = F.mse_loss(q1_a, target_q) + F.mse_loss(q2_a, target_q)
+        t1 = q1_a.detach() + torch.clamp(target_q - q1_a.detach(), -self.q_clip, self.q_clip)
+        t2 = q2_a.detach() + torch.clamp(target_q - q2_a.detach(), -self.q_clip, self.q_clip)
+        critic_loss = F.mse_loss(q1_a, t1) + F.mse_loss(q2_a, t2)
         self.critic_optim.zero_grad()
         critic_loss.backward()
         self.critic_optim.step()
