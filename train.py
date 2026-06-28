@@ -31,7 +31,11 @@ agent = SACAgent(
     max_buffer_size=200000,
     gamma=0.99,
     tau=0.005,
-    alpha=0.1,
+    alpha=0.01,   # 0.1 floods Q with a ~alpha*H/(1-gamma) entropy bonus (~5,
+                  # near-uniform) that buries the goal-advantage the argmax needs
+                  # -> stable-but-dead policy under every stabiliser (runs 363/366/
+                  # 370). 0.01 (champion's soft_alpha) cuts the pollution 10x so the
+                  # critic learns clean returns; hard-sync keeps it from diverging.
     lr=3e-4,
     goal_noise_std=30.0,
     head_layers=4,
