@@ -44,7 +44,12 @@ agent = SACAgent(
                   # oscillation SAC exists to avoid. With actor-driven behaviour the entropy
                   # is the FEATURE (exploration + anti-oscillation), so alpha goes back up.
     lr=3e-4,
-    goal_noise_std=30.0,
+    goal_noise_std=0.0,   # was 30.0 — an anti-vibration patch (break position->action
+                          # memorization), now redundant: the sampled stochastic actor is the
+                          # anti-oscillation mechanism. And 30px ≈ GOAL_RADIUS(31), so the noise
+                          # SWAMPED the goal vector at reach scale — and HER relabels only the
+                          # vector (image unchanged), so HER's close-range positive signal was
+                          # taught through pure noise = unlearnable advantage (runs 380-385).
     head_layers=4,
     head_hidden=512,
 )
