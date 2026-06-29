@@ -22,8 +22,9 @@ def test_store_and_sample_shapes():
     buf = SACReplayBuffer(max_size=1000, device='cpu')
     _fill(buf, 200)
     batch = buf.sample_buffer(32)
-    imgs, goals, motions, actions, rewards, next_imgs, next_goals, next_motions, dones = batch
+    imgs, goals, motions, actions, rewards, next_imgs, next_goals, next_motions, dones, discounts = batch
     assert imgs.shape    == (32, 3, 96, 96)
+    assert discounts.shape == (32,)
     assert goals.shape   == (32, 2)
     assert motions.shape == (32, 4)
     assert actions.shape == (32,)

@@ -20,7 +20,7 @@ def _fill_buffer(agent, n):
     for i in range(n):
         agent.memory.store_transition(
             img, goal, motion, i % agent.n_actions, float(np.random.rand()),
-            img, goal, motion, False,
+            img, goal, motion, False, discount=0.99,
         )
 
 
@@ -78,7 +78,7 @@ def test_mean_q_stays_bounded_over_repeated_updates():
         motion = np.zeros(4, dtype=np.float32)
         r = float(np.random.uniform(0.0, 1.0))
         agent.memory.store_transition(img, goal, motion, i % agent.n_actions, r,
-                                      img, goal, motion, False)
+                                      img, goal, motion, False, discount=0.99)
 
     mean_qs = []
     for _ in range(100):

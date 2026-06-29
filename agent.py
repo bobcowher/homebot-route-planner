@@ -17,12 +17,18 @@ Observation pipeline:
 
 Discrete SAC update (HARD-VALUE bootstrap variant — entropy in the actor, NOT the target):
   V(s')  = Σ_a π(a|s')·min_Q_target(s', a)           (NO −α logπ — see update_parameters)
-  critic : MSE(Q(s, a), r + γ(1-done)·V(s'))         (plain MSE, polyak target tau=0.005)
+  critic : MSE(Q(s, a), R_n + γ^m(1-done)·V(s_{t+m}))  (plain MSE, polyak target tau=0.005)
   actor  : Σ_a π(a|s)[α logπ(a|s) - min_Q(s, a)]     (entropy kept here -> policy stays soft)
 The canonical soft target's α·H/(1−γ) entropy offset floods mean_q to ~10 and buries the
 HER goal-advantage (run 389 image-blind diag: zeroing the image didn't help -> flood is in
 the bootstrap, not the representation). Dropping it from the target keeps Q at true-return
 scale while the actor stays stochastic.
+
+N-STEP RETURNS: R_n and the m-step bootstrap discount γ^m are precomputed per transition in
+the episode buffer (so HER relabels get them too) and stored with each replay row; the target
+above just reads them. Multi-step returns propagate the sparse terminal reward up to n steps
+back, carving the toward-vs-away value gradient that 1-step bootstrapping left flat (run 393:
+Δ≈0, actor entropy pinned at max). See episode_buffer.SACEpisodeBuffer._nstep_return.
 """
 import cv2
 import datetime
@@ -46,7 +52,7 @@ from motion import MotionStateDiscrete
 class SACAgent:
     def __init__(self, env, max_buffer_size=200000,
                  gamma=0.99, tau=0.005, alpha=0.1, lr=3e-4,
-                 goal_noise_std=30.0, head_layers=4, head_hidden=512):
+                 goal_noise_std=30.0, head_layers=4, head_hidden=512, n_step=3):
         self.env = env
         self.n_actions = env.action_space.n
         self.gamma = gamma
@@ -69,8 +75,9 @@ class SACAgent:
                                      head_layers=head_layers, head_hidden=head_hidden).to(self.device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
 
+        self.n_step = int(n_step)     # n-step return horizon (see episode_buffer)
         self.memory = SACReplayBuffer(max_buffer_size, device=str(self.device))
-        self.episode_buffer = SACEpisodeBuffer()
+        self.episode_buffer = SACEpisodeBuffer(n_step=self.n_step, gamma=gamma)
         self.total_env_steps = 0
         self.total_grad_steps = 0
         self._explore_heading = None   # persistent heading for front-biased warmup walk
@@ -142,10 +149,11 @@ class SACAgent:
 
     def update_parameters(self, batch_size):
         imgs, goals, motions, actions, rewards, \
-        next_imgs, next_goals, next_motions, dones = self.memory.sample_buffer(batch_size)
+        next_imgs, next_goals, next_motions, dones, discounts = self.memory.sample_buffer(batch_size)
 
-        rewards = rewards.unsqueeze(1)
-        mask    = (~dones).float().unsqueeze(1)
+        rewards   = rewards.unsqueeze(1)
+        mask      = (~dones).float().unsqueeze(1)
+        discounts = discounts.unsqueeze(1)   # γ^m bootstrap multiplier (n-step; see episode_buffer)
 
         # Critic target: HARD value V(s') = Σ_a π(a|s')·min_Q_target(s', a) — the entropy
         # term (−α·logπ) is DELIBERATELY DROPPED from the bootstrap (vs canonical soft SAC).
@@ -163,7 +171,9 @@ class SACAgent:
             q1_next, q2_next = self.critic_target(next_imgs, next_goals, next_motions)
             min_q_next = torch.min(q1_next, q2_next)
             v_next = (next_probs * min_q_next).sum(dim=1, keepdim=True)
-            target_q = rewards + mask * self.gamma * v_next
+            # rewards is the n-step return Σγ^k r; discounts is γ^m for the m-step bootstrap
+            # (m truncated at a terminal/episode end), so γ is NOT applied again here.
+            target_q = rewards + mask * discounts * v_next
 
         # Critic loss: plain MSE of each head against the soft target (canonical, no Q-clip).
         q1, q2 = self.critic(imgs, goals, motions)

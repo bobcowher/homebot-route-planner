@@ -9,14 +9,16 @@ store_transition signature:
     goal       : (2,)        float32  — noisy_world_vector [dx, dy]
     motion     : (4,)        float32  — [dx/step, dy/step, 0, 0]
     action     : int         — discrete action index
-    reward     : float
-    next_image : (3, 96, 96) uint8
+    reward     : float       — n-step return Σ γ^k r_{t+k} (1-step reward if n_step=1)
+    next_image : (3, 96, 96) uint8   — bootstrap state s_{t+m}
     next_goal  : (2,)        float32
     next_motion: (4,)        float32
     done       : bool
+    discount   : float       — γ^m bootstrap multiplier (m = n-step horizon, truncated at
+                               a terminal/episode end). Default 1.0 for direct/legacy stores.
 
 sample_buffer returns:
-    (imgs, goals, motions, actions, rewards, next_imgs, next_goals, next_motions, dones)
+    (imgs, goals, motions, actions, rewards, next_imgs, next_goals, next_motions, dones, discounts)
     actions: LongTensor (B,) — ready for .gather(1, actions.unsqueeze(1))
 """
 import os
@@ -47,12 +49,13 @@ class SACReplayBuffer:
         self.actions      = torch.zeros(max_size,                      dtype=torch.int64,   device=self.device)
         self.rewards      = torch.zeros(max_size,                      dtype=torch.float32, device=self.device)
         self.dones        = torch.zeros(max_size,                      dtype=torch.bool,    device=self.device)
+        self.discounts    = torch.ones(max_size,                       dtype=torch.float32, device=self.device)
 
     def can_sample(self, batch_size: int) -> bool:
         return self.mem_ctr >= batch_size * 10
 
     def store_transition(self, image, goal, motion, action, reward,
-                         next_image, next_goal, next_motion, done):
+                         next_image, next_goal, next_motion, done, discount=1.0):
         idx = self.mem_ctr % self.mem_size
         self.images[idx]       = torch.as_tensor(image,      dtype=torch.uint8,   device=self.device)
         self.next_images[idx]  = torch.as_tensor(next_image, dtype=torch.uint8,   device=self.device)
@@ -63,6 +66,7 @@ class SACReplayBuffer:
         self.actions[idx]      = int(action)
         self.rewards[idx]      = float(reward)
         self.dones[idx]        = bool(done)
+        self.discounts[idx]    = float(discount)
         self.mem_ctr += 1
 
     def sample_buffer(self, batch_size):
@@ -78,4 +82,5 @@ class SACReplayBuffer:
             self.next_goals[idx],
             self.next_motions[idx],
             self.dones[idx],
+            self.discounts[idx],
         )

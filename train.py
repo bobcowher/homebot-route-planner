@@ -8,6 +8,12 @@ The recipe (actor-driven discrete SAC):
     α·H/(1−γ) entropy offset floods mean_q to ~10 and buries the HER goal-advantage (run 389
     image-blind diag proved the flood is in the bootstrap, not the representation). Entropy is
     kept in the ACTOR loss so the policy stays stochastic. (avg/Q-clip/hard-sync patches reverted.)
+  - N-STEP RETURNS (n_step=3): the hard-value bootstrap (run 392) gave the first sustained
+    actor reaches (~15-20%) but then PLATEAUED — run 393 (alpha 0.05) showed entropy pinned at
+    max over 1100 eps because the per-action Q-spread Δ≈0: under sparse 0/1 + γ=0.99 + 1-step
+    bootstrap, Q(s,a)=r+γV(s') has no spatial gradient for the actor to concentrate onto.
+    3-step returns propagate the terminal reward 3 steps back (recomputed per-step inside HER
+    too), carving the toward-vs-away gradient. No shaping/env-change; ports to continuous.
   - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action), with a DECAYING
     fraction of WHOLE episodes run as pure front-biased directed traversals (Q-schedule
     1.0 -> 0.25 floor). Sparse 0/1 reward gives no advantage on its own; the directed
@@ -54,6 +60,11 @@ agent = SACAgent(
                           # taught through pure noise = unlearnable advantage (runs 380-385).
     head_layers=4,
     head_hidden=512,
+    n_step=3,     # n-step return horizon. 3 is the conservative first probe (lower off-policy
+                  # bias than 5; the directed-episode data is heavily off-policy early). If the
+                  # actor entropy drops + reach climbs past the run-392 ~20% plateau -> n-step is
+                  # the right lever; bump toward 5 for a deeper gradient. Flat -> try a dueling
+                  # /advantage head instead (the alt on the credit-assignment axis).
 )
 
 agent.train(episodes=2000, batch_size=64, warmup_steps=5000,
