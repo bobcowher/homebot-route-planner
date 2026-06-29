@@ -15,10 +15,14 @@ Observation pipeline:
   goal   : noisy_world_vector(rx, ry, gx, gy, noise_std) -> [dx, dy] float32
   motion : MotionStateDiscrete -> [dx/step, dy/step, 0, 0] float32
 
-Discrete SAC update (canonical core, matches the ant-maze SAC reference):
-  V(s')  = Σ_a π(a|s')[min_Q_target(s', a) - α logπ(a|s')]
+Discrete SAC update (HARD-VALUE bootstrap variant — entropy in the actor, NOT the target):
+  V(s')  = Σ_a π(a|s')·min_Q_target(s', a)           (NO −α logπ — see update_parameters)
   critic : MSE(Q(s, a), r + γ(1-done)·V(s'))         (plain MSE, polyak target tau=0.005)
-  actor  : Σ_a π(a|s)[α logπ(a|s) - min_Q(s, a)]
+  actor  : Σ_a π(a|s)[α logπ(a|s) - min_Q(s, a)]     (entropy kept here -> policy stays soft)
+The canonical soft target's α·H/(1−γ) entropy offset floods mean_q to ~10 and buries the
+HER goal-advantage (run 389 image-blind diag: zeroing the image didn't help -> flood is in
+the bootstrap, not the representation). Dropping it from the target keeps Q at true-return
+scale while the actor stays stochastic.
 """
 import cv2
 import datetime
@@ -143,16 +147,22 @@ class SACAgent:
         rewards = rewards.unsqueeze(1)
         mask    = (~dones).float().unsqueeze(1)
 
-        # Critic target: soft value V(s') over the discrete action expectation, using the
-        # MIN of the two target heads — canonical clipped-double-Q (TD3/SAC), matching the
-        # working ant-maze reference. (Reverted from the avg + Q-clip patches, which were
-        # added under the old argmax-over-critic behaviour to keep the critic argmax-reachable;
-        # obsolete now that behaviour samples the actor. Back to the proven core.)
+        # Critic target: HARD value V(s') = Σ_a π(a|s')·min_Q_target(s', a) — the entropy
+        # term (−α·logπ) is DELIBERATELY DROPPED from the bootstrap (vs canonical soft SAC).
+        # WHY (run 389, image-blind diagnostic): with the soft bootstrap the entropy offset
+        # α·Σπ·(−logπ) ≈ α·H/(1−γ) floods mean_q to ~10 (true max ~1) — a ~uniform ~10-magnitude
+        # term that BURIES the small inter-action goal-advantage HER manufactures, so the actor
+        # never gets a usable gradient and stays uniform. Zeroing the image (389) didn't help ->
+        # the flood is in the BOOTSTRAP, not the representation. Removing −α·logπ here pulls the
+        # target back to true-return scale (~1) so the advantage survives. Entropy is NOT
+        # abandoned — it stays in the ACTOR loss below, so the policy is still stochastic
+        # (exploration + anti-A<->B-oscillation, the reason we run SAC at all). This decouples
+        # "keep the policy soft" (actor objective) from "don't flood Q" (critic target).
         with torch.no_grad():
-            next_probs, next_log_probs = self.policy(next_imgs, next_goals, next_motions)
+            next_probs, _ = self.policy(next_imgs, next_goals, next_motions)
             q1_next, q2_next = self.critic_target(next_imgs, next_goals, next_motions)
             min_q_next = torch.min(q1_next, q2_next)
-            v_next = (next_probs * (min_q_next - self.alpha * next_log_probs)).sum(dim=1, keepdim=True)
+            v_next = (next_probs * min_q_next).sum(dim=1, keepdim=True)
             target_q = rewards + mask * self.gamma * v_next
 
         # Critic loss: plain MSE of each head against the soft target (canonical, no Q-clip).

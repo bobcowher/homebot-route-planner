@@ -3,9 +3,11 @@
 The recipe (actor-driven discrete SAC):
   - 4x512 double-Q critic + categorical actor.
   - HER (relabel to achieved goals) — this is the curriculum; no spawn/reach curriculum.
-  - Canonical critic (matches the working ant-maze SAC reference): min-double-Q soft target
-    + plain MSE + polyak target tau=0.005, static alpha=0.1. (The avg/Q-clip/hard-sync patches
-    were reverted — they were workarounds for the old argmax-over-critic behaviour.)
+  - HARD-VALUE critic: min-double-Q target with the entropy term DROPPED from the bootstrap
+    (V=Σπ·minQ, no −α·logπ) + plain MSE + polyak tau=0.005, static alpha=0.1. The soft target's
+    α·H/(1−γ) entropy offset floods mean_q to ~10 and buries the HER goal-advantage (run 389
+    image-blind diag proved the flood is in the bootstrap, not the representation). Entropy is
+    kept in the ACTOR loss so the policy stays stochastic. (avg/Q-clip/hard-sync patches reverted.)
   - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action), with a DECAYING
     fraction of WHOLE episodes run as pure front-biased directed traversals (Q-schedule
     1.0 -> 0.25 floor). Sparse 0/1 reward gives no advantage on its own; the directed
