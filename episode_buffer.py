@@ -30,6 +30,7 @@ class SACEpisodeBuffer:
     """Caches one episode's transitions for HER relabeling (future strategy)."""
 
     K = 2
+    HER_HORIZON = 50.0   # future-offset bias scale; ~ gamma's effective horizon (1/(1-gamma))
 
     def __init__(self):
         self._transitions: list[SACTransition] = []
@@ -75,7 +76,18 @@ class SACEpisodeBuffer:
             kk = min(kk, len(future))
             if kk <= 0:
                 continue
-            for hg_t in random.sample(future, kk):
+            # Near-biased future sampling: weight each future offset d (1..N) by exp(-d/H) so
+            # relabeled goals fall within gamma's effective horizon (~1/(1-gamma)=100 steps at
+            # gamma=0.99). Uniform sampling (random.sample) drew mostly FAR goals whose reward
+            # is discounted to ~0 -> an advantage the critic can't learn (runs 385/386 stalled
+            # with entropy stuck near max). H = HER_HORIZON.
+            n_future = len(future)
+            offsets = np.arange(1, n_future + 1, dtype=np.float64)
+            w = np.exp(-offsets / self.HER_HORIZON)
+            w /= w.sum()
+            idxs = np.random.choice(n_future, size=kk, replace=False, p=w)
+            for j in idxs:
+                hg_t = future[int(j)]
                 hg = hg_t.achieved_next
                 hindsight_reward = float(compute_reward(
                     t.achieved_next[np.newaxis], hg[np.newaxis], {},
