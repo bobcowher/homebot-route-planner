@@ -8,12 +8,15 @@ The recipe (actor-driven discrete SAC):
     α·H/(1−γ) entropy offset floods mean_q to ~10 and buries the HER goal-advantage (run 389
     image-blind diag proved the flood is in the bootstrap, not the representation). Entropy is
     kept in the ACTOR loss so the policy stays stochastic. (avg/Q-clip/hard-sync patches reverted.)
-  - N-STEP RETURNS (n_step=3): the hard-value bootstrap (run 392) gave the first sustained
-    actor reaches (~15-20%) but then PLATEAUED — run 393 (alpha 0.05) showed entropy pinned at
-    max over 1100 eps because the per-action Q-spread Δ≈0: under sparse 0/1 + γ=0.99 + 1-step
-    bootstrap, Q(s,a)=r+γV(s') has no spatial gradient for the actor to concentrate onto.
-    3-step returns propagate the terminal reward 3 steps back (recomputed per-step inside HER
-    too), carving the toward-vs-away gradient. No shaping/env-change; ports to continuous.
+  - N-STEP RETURNS (n_step=8): the funnel diagnostic (scripts/diagnose_qspread.py) on run 394
+    (n=3) overturned the "V is flat" read — the critic DID learn a clean distance-to-goal value
+    field, but only a ~150px FUNNEL around the goal; beyond ~150px V is flat ~0 out to map scale
+    (864x576), so most random-start spawns get ZERO directional signal -> reach stalls ~15-20%.
+    γ_eff was harsher than the true 0.99 with distance (far value UNDER-PROPAGATING): n=3 didn't
+    flow the terminal reward back across the map. n=8 propagates it 8 steps/update to WIDEN the
+    funnel (the in-funnel per-action advantage is already correct + the actor reads it; the wall
+    is funnel WIDTH, not value-blindness). HER relabels get n-step returns too. Success metric =
+    funnel width via the diagnostic on a checkpoint (seconds), not a 1500-ep entropy trend.
   - Behaviour = SAMPLE the stochastic actor (agent.sample_actor_action), with a DECAYING
     fraction of WHOLE episodes run as pure front-biased directed traversals (Q-schedule
     1.0 -> 0.25 floor). Sparse 0/1 reward gives no advantage on its own; the directed
@@ -60,11 +63,13 @@ agent = SACAgent(
                           # taught through pure noise = unlearnable advantage (runs 380-385).
     head_layers=4,
     head_hidden=512,
-    n_step=3,     # n-step return horizon. 3 is the conservative first probe (lower off-policy
-                  # bias than 5; the directed-episode data is heavily off-policy early). If the
-                  # actor entropy drops + reach climbs past the run-392 ~20% plateau -> n-step is
-                  # the right lever; bump toward 5 for a deeper gradient. Flat -> try a dueling
-                  # /advantage head instead (the alt on the credit-assignment axis).
+    n_step=8,     # n-step return horizon. 3 (run 394) was too small to widen the ~150px value
+                  # funnel the diagnostic measured; 8 propagates the terminal reward 8 steps/update
+                  # back across the map to extend the funnel. Tradeoff: larger n = more off-policy
+                  # bias (intermediate actions are the behaviour policy's, not the current actor's)
+                  # — acceptable here, the directed-episode reaches are what we WANT propagated.
+                  # READ via scripts/diagnose_qspread.py on a checkpoint: did V stay positive past
+                  # ~150px (funnel widened)? If yes but partial, push n higher (12-16) or raise γ.
 )
 
 agent.train(episodes=2000, batch_size=64, warmup_steps=5000,
